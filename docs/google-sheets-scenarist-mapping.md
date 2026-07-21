@@ -73,8 +73,9 @@
 - `montage_compliance` — проверка монтажа по ТЗ;
 - `final_client` — финальное согласование клиента.
 
-Решения: `pending`, `approved`, `revision`. Комментарии дополнительно сохраняются в
-`scenario_comments` с автором и этапом.
+Решения: `pending`, `approved`, `revision`, `rejected`. Колонка комментария хранит текущее
+значение `scenario_approvals.comment` и не дублируется автоматически. `scenario_comments` —
+отдельная история обсуждения через `GET|POST /api/v1/scenarios/{id}/comments`.
 
 ## Следующие модули
 

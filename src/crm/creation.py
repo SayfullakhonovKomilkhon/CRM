@@ -44,6 +44,22 @@ def require_assignable_scenarist(user: User | None) -> User:
     return user
 
 
+def require_assignable_editor(user: User | None) -> User:
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Editor not found")
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Editor is inactive",
+        )
+    if user.role != Role.EDITOR:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Assigned user is not an editor",
+        )
+    return user
+
+
 def resolve_scenarist_assignment(
     actor: User,
     requested_id: uuid.UUID | None,

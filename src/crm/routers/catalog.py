@@ -117,12 +117,25 @@ async def create_project(
 
 @router.get("/users/scenarists", response_model=list[UserOptionRead])
 async def list_scenarists(
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (
         select(User)
         .where(User.role == Role.SCENARIST, User.is_active.is_(True))
+        .order_by(User.full_name)
+    )
+    return list((await session.scalars(query)).all())
+
+
+@router.get("/users/editors", response_model=list[UserOptionRead])
+async def list_editors(
+    _: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
+    session: AsyncSession = Depends(get_session),
+) -> list[User]:
+    query = (
+        select(User)
+        .where(User.role == Role.EDITOR, User.is_active.is_(True))
         .order_by(User.full_name)
     )
     return list((await session.scalars(query)).all())

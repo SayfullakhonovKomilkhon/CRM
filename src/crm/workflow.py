@@ -7,6 +7,7 @@ EDITOR_VISIBLE_STATUSES = frozenset(
         ScenarioStatus.HANDED_TO_EDITOR,
         ScenarioStatus.EDITING,
         ScenarioStatus.CLIENT_REVIEW,
+        ScenarioStatus.APPROVED,
         ScenarioStatus.PUBLISHED,
     }
 )
@@ -20,6 +21,7 @@ ROLE_APPROVAL_STAGES: dict[Role, set[ApprovalStage]] = {
         ApprovalStage.FINAL_CLIENT,
     },
 }
+APPROVAL_STAGE_ORDER = tuple(ApprovalStage)
 
 
 def approval_for(scenario: Scenario, stage: ApprovalStage):
@@ -29,6 +31,37 @@ def approval_for(scenario: Scenario, stage: ApprovalStage):
 def is_approved(scenario: Scenario, stage: ApprovalStage) -> bool:
     approval = approval_for(scenario, stage)
     return approval is not None and approval.decision == ApprovalDecision.APPROVED
+
+
+def _reset_approval(approval) -> None:
+    approval.decision = ApprovalDecision.PENDING
+    approval.decided_by_id = None
+    approval.decided_at = None
+
+
+def _unpublish(scenario: Scenario) -> None:
+    if scenario.publication is not None:
+        scenario.publication.is_published = False
+
+
+def reset_downstream_approvals(scenario: Scenario, stage: ApprovalStage) -> None:
+    """Invalidate decisions that depended on a now non-approved stage."""
+    stage_index = APPROVAL_STAGE_ORDER.index(stage)
+    downstream = set(APPROVAL_STAGE_ORDER[stage_index + 1 :])
+    for approval in scenario.approvals:
+        if approval.stage in downstream:
+            _reset_approval(approval)
+    _unpublish(scenario)
+
+
+def reset_approvals_from(scenario: Scenario, stage: ApprovalStage) -> None:
+    """Invalidate a stage and every later decision after its source data changed."""
+    stage_index = APPROVAL_STAGE_ORDER.index(stage)
+    invalidated = set(APPROVAL_STAGE_ORDER[stage_index:])
+    for approval in scenario.approvals:
+        if approval.stage in invalidated:
+            _reset_approval(approval)
+    _unpublish(scenario)
 
 
 def require_stage_role(role: Role, stage: ApprovalStage) -> None:
@@ -123,7 +156,7 @@ def status_after_decision(
     decision: ApprovalDecision,
 ) -> ScenarioStatus:
     if decision == ApprovalDecision.PENDING:
-        return scenario.status
+        return status_after_unpublishing(scenario)
 
     transitions = {
         (ApprovalStage.RESPONSIBLE_REVIEW, ApprovalDecision.APPROVED): ScenarioStatus.CLIENT_REVIEW,

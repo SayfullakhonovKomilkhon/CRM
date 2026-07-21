@@ -9,7 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from crm.creation import require_active_project, resolve_scenarist_assignment
+from crm.creation import (
+    require_active_project,
+    require_assignable_editor,
+    require_assignable_scenarist,
+    resolve_scenarist_assignment,
+)
 from crm.database import get_session
 from crm.dependencies import get_current_user, require_roles
 from crm.models import (
@@ -29,6 +34,8 @@ from crm.models import (
     User,
 )
 from crm.schemas import (
+    MAX_COMMENT_LENGTH,
+    MAX_TEXT_LENGTH,
     ApprovalRead,
     ApprovalUpdate,
     CommentCreate,
@@ -53,6 +60,7 @@ from crm.schemas import (
     SheetScenarioPage,
     SheetScenarioRow,
     SortOrder,
+    normalize_http_url,
 )
 from crm.sheet import columns_for_role, editable_fields_for_role, values_for_role
 from crm.workflow import (
@@ -62,6 +70,8 @@ from crm.workflow import (
     publication_section_available,
     require_stage_prerequisites,
     require_stage_role,
+    reset_approvals_from,
+    reset_downstream_approvals,
     stage_prerequisites_met,
     status_after_decision,
     status_after_unpublishing,
@@ -75,7 +85,7 @@ LOAD_SCENARIO = (
     selectinload(Scenario.content),
     selectinload(Scenario.approvals),
     selectinload(Scenario.comments),
-    selectinload(Scenario.montage),
+    selectinload(Scenario.montage).selectinload(MontageTask.assigned_editor),
     selectinload(Scenario.publication),
 )
 
@@ -100,9 +110,15 @@ def apply_visibility(query, user: User):
 
 
 async def get_visible_scenario(
-    session: AsyncSession, scenario_id: uuid.UUID, user: User
+    session: AsyncSession,
+    scenario_id: uuid.UUID,
+    user: User,
+    *,
+    for_update: bool = False,
 ) -> Scenario:
     query = select(Scenario).where(Scenario.id == scenario_id).options(*LOAD_SCENARIO)
+    if for_update:
+        query = query.with_for_update()
     scenario = await session.scalar(apply_visibility(query, user))
     if scenario is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scenario not found")
@@ -126,15 +142,23 @@ def scenario_for_role(scenario: Scenario, user: User) -> ScenarioRead:
         available_sections.append("montage")
     if publication_section_available(scenario):
         available_sections.append("publication")
-    if user.role in {Role.MANAGER, Role.SCENARIST}:
+    if user.role in {Role.MANAGER, Role.SCENARIST, Role.EDITOR}:
         available_sections.append("history")
 
-    result = result.model_copy(
-        update={
-            "available_sections": available_sections,
-            "available_approval_stages": available_approval_stages,
-        }
-    )
+    updates = {
+        "available_sections": available_sections,
+        "available_approval_stages": available_approval_stages,
+    }
+    if user.role == Role.CLIENT:
+        updates["assigned_scenarist_id"] = None
+        if result.scenarist is not None:
+            updates["scenarist"] = result.scenarist.model_copy(update={"id": None})
+        if result.montage is not None:
+            updates["montage"] = result.montage.model_copy(
+                update={"assigned_editor_id": None}
+            )
+
+    result = result.model_copy(update=updates)
 
     return result
 
@@ -240,7 +264,7 @@ async def list_scenarios(
                 part[0].upper() for part in (row.scenarist_name or "").split()[:2] if part
             )
             scenarist = ScenaristSummary(
-                id=row.scenarist_id,
+                id=None if user.role == Role.CLIENT else row.scenarist_id,
                 name=row.scenarist_name,
                 initials=initials,
             )
@@ -439,10 +463,26 @@ SHEET_DATE_FIELDS = {
     "montage.ready_at",
     "publication.publication_date",
 }
-SHEET_UUID_FIELDS = {"montage.assigned_editor_id"}
+SHEET_UUID_FIELDS = {"assigned_scenarist_id", "montage.assigned_editor_id"}
 SHEET_DECIMAL_FIELDS = {"montage.price"}
 SHEET_INTEGER_FIELDS = {"score"}
 SHEET_BOOLEAN_FIELDS = {"publication.is_published"}
+SHEET_URL_FIELDS = {
+    "research.competitor_url",
+    "montage.source_material_url",
+    "montage.ready_material_url",
+    "publication.instagram_url",
+}
+SHEET_STRING_LIMITS = {
+    "scenario_type": 100,
+    "visual_format": 255,
+    "speaker": 255,
+    "research.competitor_category": 255,
+    "montage.external_editor_name": 255,
+    "montage.material_status": 100,
+    "montage.brief_compliance_status": 100,
+    "montage.scenarist_revision_status": 100,
+}
 
 
 def coerce_sheet_value(field: str, value):
@@ -468,7 +508,17 @@ def coerce_sheet_value(field: str, value):
         if field in SHEET_UUID_FIELDS:
             return value if isinstance(value, uuid.UUID) else uuid.UUID(value) if value else None
         if field in SHEET_DECIMAL_FIELDS:
-            return Decimal(str(value)) if value is not None else None
+            if value is None:
+                return None
+            parsed_decimal = Decimal(str(value))
+            if not parsed_decimal.is_finite() or parsed_decimal < 0:
+                raise ValueError
+            _, digits, exponent = parsed_decimal.as_tuple()
+            decimal_places = max(-exponent, 0)
+            integer_digits = max(len(digits) + exponent, 0)
+            if decimal_places > 2 or integer_digits > 10:
+                raise ValueError
+            return parsed_decimal
         if field in SHEET_INTEGER_FIELDS:
             parsed = int(value) if value is not None else None
             if parsed is not None and not 0 <= parsed <= 100:
@@ -488,6 +538,21 @@ def coerce_sheet_value(field: str, value):
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid value for {field}",
         )
+    if field in SHEET_URL_FIELDS:
+        try:
+            return normalize_http_url(value)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid value for {field}",
+            ) from error
+    if isinstance(value, str):
+        limit = SHEET_STRING_LIMITS.get(field, MAX_TEXT_LENGTH)
+        if len(value) > limit:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Value for {field} exceeds {limit} characters",
+            )
     return value
 
 
@@ -499,7 +564,7 @@ async def patch_scenario_sheet_row(
     session: AsyncSession = Depends(get_session),
 ) -> SheetRowPatchResult:
     """Atomically update role-owned inline cells with optimistic locking."""
-    scenario = await get_visible_scenario(session, scenario_id, user)
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
     if scenario.updated_at != payload.expected_version:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -531,8 +596,16 @@ async def patch_scenario_sheet_row(
         else:
             regular_changes.append(change)
 
+    script_changed = False
+    source_material_changed = False
+    ready_material_changed = False
     for change in regular_changes:
         value = coerce_sheet_value(change.field, change.value)
+        if change.field == "assigned_scenarist_id":
+            if value is not None:
+                value = require_assignable_scenarist(await session.get(User, value)).id
+            scenario.assigned_scenarist_id = value
+            continue
         if "." not in change.field:
             setattr(scenario, change.field, value)
             continue
@@ -555,7 +628,39 @@ async def patch_scenario_sheet_row(
             target = scenario.publication
         else:  # pragma: no cover - guarded by editable field registry
             raise HTTPException(status_code=422, detail=f"Unsupported field {change.field}")
+        old_value = getattr(target, attribute)
+        if change.field == "montage.assigned_editor_id" and value is not None:
+            value = require_assignable_editor(await session.get(User, value)).id
+        script_changed |= change.field == "content.script_text" and old_value != value
+        source_material_changed |= (
+            change.field == "montage.source_material_url" and old_value != value
+        )
+        ready_material_changed |= (
+            change.field == "montage.ready_material_url" and old_value != value
+        )
         setattr(target, attribute, value)
+
+    if script_changed:
+        reset_approvals_from(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+        scenario.status = (
+            ScenarioStatus.IN_REVIEW
+            if scenario.content and scenario.content.script_text
+            else ScenarioStatus.DRAFT
+        )
+    if source_material_changed:
+        reset_approvals_from(scenario, ApprovalStage.SOURCE_MATERIAL)
+        scenario.status = (
+            ScenarioStatus.SENT_TO_GENERATION
+            if is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
+            else status_after_unpublishing(scenario)
+        )
+    if ready_material_changed:
+        reset_approvals_from(scenario, ApprovalStage.MONTAGE_COMPLIANCE)
+        scenario.status = (
+            ScenarioStatus.EDITING
+            if is_approved(scenario, ApprovalStage.SOURCE_MATERIAL)
+            else status_after_unpublishing(scenario)
+        )
 
     stage_order = [
         ApprovalStage.RESPONSIBLE_REVIEW,
@@ -575,12 +680,16 @@ async def patch_scenario_sheet_row(
             scenario.approvals.append(approval)
         if "comment" in changes:
             comment = changes["comment"]
-            if comment is not None and not isinstance(comment, str):
+            if comment is not None and (
+                not isinstance(comment, str) or len(comment) > MAX_COMMENT_LENGTH
+            ):
                 raise HTTPException(status_code=422, detail=f"Invalid comment for {stage.value}")
             approval.comment = comment
         if "note" in changes:
             note = changes["note"]
-            if note is not None and not isinstance(note, str):
+            if note is not None and (
+                not isinstance(note, str) or len(note) > MAX_COMMENT_LENGTH
+            ):
                 raise HTTPException(status_code=422, detail=f"Invalid note for {stage.value}")
             approval.note = note
         if "decision" in changes:
@@ -592,8 +701,12 @@ async def patch_scenario_sheet_row(
                 ) from error
             require_stage_prerequisites(scenario, stage)
             approval.decision = decision
-            approval.decided_by_id = user.id
-            approval.decided_at = datetime.now(UTC)
+            approval.decided_by_id = None if decision == ApprovalDecision.PENDING else user.id
+            approval.decided_at = (
+                None if decision == ApprovalDecision.PENDING else datetime.now(UTC)
+            )
+            if decision != ApprovalDecision.APPROVED:
+                reset_downstream_approvals(scenario, stage)
             scenario.status = status_after_decision(scenario, stage, decision)
 
     approval_decision_changed = any(
@@ -658,17 +771,24 @@ async def get_scenario(
 async def update_scenario(
     scenario_id: uuid.UUID,
     payload: ScenarioUpdate,
-    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST)),
+    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
     session: AsyncSession = Depends(get_session),
 ) -> ScenarioRead:
-    scenario = await get_visible_scenario(session, scenario_id, user)
-    if user.role == Role.SCENARIST and scenario.assigned_scenarist_id not in (None, user.id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
 
     changes = payload.model_dump(exclude_unset=True, exclude={"research", "content"})
+    if "assigned_scenarist_id" in changes:
+        requested_scenarist_id = changes.pop("assigned_scenarist_id")
+        if requested_scenarist_id is None:
+            scenario.assigned_scenarist_id = None
+        else:
+            scenario.assigned_scenarist_id = require_assignable_scenarist(
+                await session.get(User, requested_scenarist_id)
+            ).id
     for key, value in changes.items():
         setattr(scenario, key, value)
 
+    script_changed = False
     if payload.research is not None:
         if scenario.research is None:
             scenario.research = ScenarioResearch()
@@ -677,14 +797,29 @@ async def update_scenario(
     if payload.content is not None:
         if scenario.content is None:
             scenario.content = ScenarioContent()
+        if "script_text" in payload.content.model_fields_set:
+            script_changed = scenario.content.script_text != payload.content.script_text
         for key, value in payload.content.model_dump(exclude_unset=True).items():
             setattr(scenario.content, key, value)
+
+    if script_changed:
+        reset_approvals_from(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+        scenario.status = (
+            ScenarioStatus.IN_REVIEW
+            if scenario.content and scenario.content.script_text
+            else ScenarioStatus.DRAFT
+        )
 
     if user.role == Role.SCENARIST and scenario.status == ScenarioStatus.REVISION:
         scenario.status = ScenarioStatus.IN_REVIEW
 
+    scenario.updated_at = datetime.now(UTC)
     await session.commit()
-    updated = await get_visible_scenario(session, scenario.id, user)
+    updated = await session.scalar(
+        select(Scenario).where(Scenario.id == scenario.id).options(*LOAD_SCENARIO)
+    )
+    if updated is None:  # pragma: no cover - the locked row cannot disappear here
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scenario not found")
     return scenario_for_role(updated, user)
 
 
@@ -693,20 +828,23 @@ async def set_approval(
     scenario_id: uuid.UUID,
     stage: ApprovalStage,
     payload: ApprovalUpdate,
-    user: User = Depends(require_roles(Role.MANAGER, Role.CLIENT)),
+    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.CLIENT)),
     session: AsyncSession = Depends(get_session),
 ) -> ScenarioApproval:
-    scenario = await get_visible_scenario(session, scenario_id, user)
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
     require_stage_role(user.role, stage)
     require_stage_prerequisites(scenario, stage)
     if (
-        user.role == Role.CLIENT
-        and "note" in payload.model_fields_set
+        "note" in payload.model_fields_set
         and stage != ApprovalStage.PRE_GENERATION_CLIENT
     ):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Client note is only available for scenario approval",
+            status_code=(
+                status.HTTP_403_FORBIDDEN
+                if user.role == Role.CLIENT
+                else status.HTTP_422_UNPROCESSABLE_ENTITY
+            ),
+            detail="Note is only available for scenario approval",
         )
     approval = await session.scalar(
         select(ScenarioApproval).where(
@@ -720,9 +858,16 @@ async def set_approval(
     approval.comment = payload.comment
     if "note" in payload.model_fields_set:
         approval.note = payload.note
-    approval.decided_by_id = user.id
-    approval.decided_at = datetime.now(UTC)
+    approval.decided_by_id = (
+        None if payload.decision == ApprovalDecision.PENDING else user.id
+    )
+    approval.decided_at = (
+        None if payload.decision == ApprovalDecision.PENDING else datetime.now(UTC)
+    )
+    if payload.decision != ApprovalDecision.APPROVED:
+        reset_downstream_approvals(scenario, stage)
     scenario.status = status_after_decision(scenario, stage, payload.decision)
+    scenario.updated_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(approval)
     return approval
@@ -751,7 +896,7 @@ async def create_comment(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> ScenarioComment:
-    await get_visible_scenario(session, scenario_id, user)
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
     if user.role == Role.CLIENT and payload.stage not in {
         ApprovalStage.PRE_GENERATION_CLIENT.value,
         ApprovalStage.FINAL_CLIENT.value,
@@ -767,6 +912,7 @@ async def create_comment(
         text=payload.text,
     )
     session.add(comment)
+    scenario.updated_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(comment)
     return comment
@@ -776,10 +922,10 @@ async def create_comment(
 async def update_montage(
     scenario_id: uuid.UUID,
     payload: MontageUpdate,
-    user: User = Depends(require_roles(Role.MANAGER)),
+    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
     session: AsyncSession = Depends(get_session),
 ) -> MontageTask:
-    scenario = await get_visible_scenario(session, scenario_id, user)
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
     if not is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -787,10 +933,26 @@ async def update_montage(
         )
     if scenario.montage is None:
         scenario.montage = MontageTask()
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    montage_changes = payload.model_dump(exclude_unset=True)
+    if (
+        "assigned_editor_id" in montage_changes
+        and montage_changes["assigned_editor_id"] is not None
+    ):
+        montage_changes["assigned_editor_id"] = require_assignable_editor(
+            await session.get(User, montage_changes["assigned_editor_id"])
+        ).id
+    source_material_changed = (
+        "source_material_url" in montage_changes
+        and scenario.montage.source_material_url != montage_changes["source_material_url"]
+    )
+    for key, value in montage_changes.items():
         setattr(scenario.montage, key, value)
+    if source_material_changed:
+        reset_approvals_from(scenario, ApprovalStage.SOURCE_MATERIAL)
+        scenario.status = ScenarioStatus.SENT_TO_GENERATION
     if scenario.montage.assigned_editor_id and is_approved(scenario, ApprovalStage.SOURCE_MATERIAL):
         scenario.status = ScenarioStatus.HANDED_TO_EDITOR
+    scenario.updated_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(scenario.montage)
     return scenario.montage
@@ -800,18 +962,26 @@ async def update_montage(
 async def update_montage_as_editor(
     scenario_id: uuid.UUID,
     payload: EditorMontageUpdate,
-    user: User = Depends(require_roles(Role.EDITOR)),
+    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
     session: AsyncSession = Depends(get_session),
 ) -> MontageTask:
-    scenario = await get_visible_scenario(session, scenario_id, user)
-    if scenario.montage is None or scenario.montage.assigned_editor_id != user.id:
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+    if scenario.montage is None or not is_approved(scenario, ApprovalStage.SOURCE_MATERIAL):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Montage task is not assigned to this editor",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Source material must be approved before montage result",
         )
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    editor_changes = payload.model_dump(exclude_unset=True)
+    ready_material_changed = (
+        "ready_material_url" in editor_changes
+        and scenario.montage.ready_material_url != editor_changes["ready_material_url"]
+    )
+    for key, value in editor_changes.items():
         setattr(scenario.montage, key, value)
+    if ready_material_changed:
+        reset_approvals_from(scenario, ApprovalStage.MONTAGE_COMPLIANCE)
     scenario.status = ScenarioStatus.EDITING
+    scenario.updated_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(scenario.montage)
     return scenario.montage
@@ -821,10 +991,10 @@ async def update_montage_as_editor(
 async def update_publication(
     scenario_id: uuid.UUID,
     payload: PublicationUpdate,
-    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST)),
+    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
     session: AsyncSession = Depends(get_session),
 ) -> Publication:
-    scenario = await get_visible_scenario(session, scenario_id, user)
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
     if not is_approved(scenario, ApprovalStage.FINAL_CLIENT):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -841,6 +1011,7 @@ async def update_publication(
         scenario.status = ScenarioStatus.PUBLISHED
     elif scenario.status == ScenarioStatus.PUBLISHED:
         scenario.status = status_after_unpublishing(scenario)
+    scenario.updated_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(scenario.publication)
     return scenario.publication

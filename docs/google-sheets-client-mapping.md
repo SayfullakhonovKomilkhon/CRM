@@ -17,10 +17,10 @@
 | Google Sheets | Backend | Доступ клиента |
 |---|---|---|
 | Одобрение сценария | approval `pre_generation_client` | изменение |
-| Комментарий / замечания | approval comment + `scenario_comments` | изменение |
-| Примечание | comment stage `pre_generation_client` | изменение |
+| Комментарий / замечания | approval `pre_generation_client`.comment | изменение |
+| Примечание | approval `pre_generation_client`.note | изменение |
 
-Решения: `pending`, `approved`, `revision`.
+Решения: `pending`, `approved`, `revision`, `rejected`.
 
 ## Готовый монтаж
 
@@ -28,9 +28,9 @@
 |---|---|---|
 | Ссылка с готовым монтажом | `montage_tasks.ready_material_url` | чтение |
 | Одобрение монтажа | approval `final_client` | изменение |
-| Комментарий / замечания | approval comment + `scenario_comments` | изменение |
+| Комментарий / замечания | approval `final_client`.comment | изменение |
 
-Ссылку готового материала устанавливает монтажёр или менеджер.
+Ссылку готового материала устанавливает любая внутренняя роль.
 
 ## Публикация
 
@@ -49,4 +49,8 @@
 | ИИ-описания сетей | `publications.ai_social_descriptions` | чтение |
 | Сценарий от Леи | `publications.leia_script` | чтение |
 
-Публикационные поля обновляет сценарист или менеджер. Для клиента они read-only.
+Публикационные поля обновляет любая внутренняя роль. Для клиента они read-only.
+
+Колонки approval-комментариев содержат текущее значение решения. Они не создают сообщения
+автоматически. `scenario_comments` используется отдельно как история обсуждения через
+`GET|POST /api/v1/scenarios/{id}/comments`; клиенту доступны только два клиентских этапа.

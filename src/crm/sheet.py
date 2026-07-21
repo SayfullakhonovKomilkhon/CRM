@@ -17,8 +17,8 @@ class SheetFieldSpec:
 
 
 ALL_ROLES = frozenset(Role)
-INTERNAL_ROLES = frozenset({Role.MANAGER, Role.SCENARIST})
-PRODUCTION_ROLES = frozenset({Role.MANAGER, Role.SCENARIST, Role.EDITOR})
+INTERNAL_ROLES = frozenset({Role.MANAGER, Role.SCENARIST, Role.EDITOR})
+PRODUCTION_ROLES = INTERNAL_ROLES
 
 
 def field(
@@ -37,6 +37,7 @@ SHEET_FIELDS = (
     field("project.name", "Проект", "Основное"),
     field("project.client_name", "Клиент", "Основное", INTERNAL_ROLES),
     field("scenarist.name", "Сценарист", "Основное", ALL_ROLES),
+    field("assigned_scenarist_id", "Назначить сценариста", "Основное", ALL_ROLES, "inline"),
     field("speaker", "Спикер", "Основное", editor="inline"),
     field("deadline", "Дедлайн", "Основное", PRODUCTION_ROLES, "inline"),
     field("scenario_type", "Тип сценария", "Исследование", INTERNAL_ROLES, "inline"),
@@ -73,6 +74,7 @@ SHEET_FIELDS = (
         "detail",
     ),
     field("research.ai_analysis", "ИИ-анализ", "Исследование", INTERNAL_ROLES, "detail"),
+    field("content.claude_context", "Контекст Claude", "Сценарий", INTERNAL_ROLES, "detail"),
     field("content.cover_text", "Текст на обложке", "Сценарий", ALL_ROLES, "inline"),
     field("content.script_text", "Сценарий", "Сценарий", ALL_ROLES, "detail"),
     field("content.montage_brief", "ТЗ для монтажа", "Сценарий", PRODUCTION_ROLES, "detail"),
@@ -88,6 +90,7 @@ SHEET_FIELDS = (
     field("content.call_to_action", "Призыв к действию", "Сценарий", INTERNAL_ROLES, "inline"),
     field("content.visual_notes", "Визуальный формат", "Сценарий", INTERNAL_ROLES, "detail"),
     field("content.score_recommendations", "Рекомендации", "Сценарий", INTERNAL_ROLES, "detail"),
+    field("content.ai_review", "ИИ-проверка сценария", "Сценарий", INTERNAL_ROLES, "detail"),
     field(
         "approval.responsible_review.decision",
         "Одобрение ответственного",
@@ -149,10 +152,18 @@ SHEET_FIELDS = (
         "inline",
     ),
     field("montage.assigned_editor_id", "Монтажёр", "Монтаж", PRODUCTION_ROLES, "inline"),
+    field("montage.assigned_editor_name", "Имя монтажёра", "Монтаж", ALL_ROLES),
     field("montage.external_editor_name", "Внешний монтажёр", "Монтаж", PRODUCTION_ROLES, "inline"),
     field("montage.price", "Цена монтажа", "Монтаж", PRODUCTION_ROLES, "inline"),
     field("montage.payment_due_date", "Период оплаты", "Монтаж", PRODUCTION_ROLES, "inline"),
     field("montage.material_status", "Статус материалов", "Монтаж", PRODUCTION_ROLES, "inline"),
+    field(
+        "montage.scenarist_material_comment",
+        "Комментарий сценариста к материалам",
+        "Монтаж",
+        PRODUCTION_ROLES,
+        "detail",
+    ),
     field(
         "montage.ready_material_url",
         "Готовый материал",
@@ -172,6 +183,44 @@ SHEET_FIELDS = (
     ),
     field(
         "montage.ready_at", "Дата готового монтажа", "Результат монтажа", PRODUCTION_ROLES, "inline"
+    ),
+    field(
+        "montage.brief_compliance_status",
+        "Статус проверки по ТЗ",
+        "Проверка",
+        PRODUCTION_ROLES,
+        "inline",
+    ),
+    field(
+        "montage.bot_visual_analysis",
+        "Раскладка бота-анализатора",
+        "Проверка",
+        PRODUCTION_ROLES,
+        "detail",
+    ),
+    field(
+        "montage.compliance_analysis",
+        "Анализ соответствия",
+        "Проверка",
+        PRODUCTION_ROLES,
+        "detail",
+    ),
+    field(
+        "montage.ai_analysis", "ИИ-анализ монтажа", "Проверка", PRODUCTION_ROLES, "detail"
+    ),
+    field(
+        "montage.scenarist_revision_status",
+        "Исправление сценариста",
+        "Проверка",
+        PRODUCTION_ROLES,
+        "inline",
+    ),
+    field(
+        "montage.scenarist_revision_comment",
+        "Комментарий сценариста к исправлению",
+        "Проверка",
+        PRODUCTION_ROLES,
+        "detail",
     ),
     field(
         "approval.montage_compliance.decision",
@@ -273,6 +322,20 @@ SHEET_FIELDS = (
         INTERNAL_ROLES,
         "detail",
     ),
+    field(
+        "publication.ai_social_descriptions",
+        "ИИ-описания сетей",
+        "Публикация",
+        INTERNAL_ROLES,
+        "detail",
+    ),
+    field(
+        "publication.leia_script",
+        "Сценарий от Леи",
+        "Публикация",
+        INTERNAL_ROLES,
+        "detail",
+    ),
 )
 
 SHEET_FIELD_MAP = {item.field: item for item in SHEET_FIELDS}
@@ -304,7 +367,7 @@ def _nested_value(value, path: str):
     return current
 
 
-def values_for_role(scenario: ScenarioRead, _role: Role) -> dict[str, object]:
+def values_for_role(scenario: ScenarioRead, role: Role) -> dict[str, object]:
     values: dict[str, object] = {}
     approvals = {item.stage.value: item for item in scenario.approvals}
     for item in SHEET_FIELDS:
@@ -315,6 +378,11 @@ def values_for_role(scenario: ScenarioRead, _role: Role) -> dict[str, object]:
                 value = value.value
         else:
             value = _nested_value(scenario, item.field)
+        if role == Role.CLIENT and item.field in {
+            "assigned_scenarist_id",
+            "montage.assigned_editor_id",
+        }:
+            value = None
         if item.editor == "detail" and isinstance(value, str) and len(value) > 240:
             value = f"{value[:237]}…"
         values[item.field] = value

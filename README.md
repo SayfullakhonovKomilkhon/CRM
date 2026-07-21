@@ -32,6 +32,7 @@ The frontend base URL is `http://localhost:8000/api/v1`.
 - `GET|POST /api/v1/clients`
 - `GET|POST /api/v1/projects`
 - `GET /api/v1/users/scenarists`
+- `GET /api/v1/users/editors`
 - `GET|POST /api/v1/scenarios`
 - `GET|PATCH /api/v1/scenarios/{id}`
 - `PUT /api/v1/scenarios/{id}/approvals/{stage}`
@@ -52,8 +53,8 @@ List filters include repeatable `status`, `project_id`, `assigned_scenarist_id`,
 - Only a manager can create clients and projects. A project must reference an existing,
   active client.
 - A manager can create a scenario in an active project and optionally assign an active
-  user with the `scenarist` role. `GET /api/v1/users/scenarists` is the manager-only
-  assignment directory.
+  user with the `scenarist` role. The scenarist and editor assignment directories are
+  available to manager, scenarist, and editor roles, but never to clients.
 - A scenarist can create a scenario only in an existing active project. The backend
   always assigns the new scenario to the authenticated scenarist.
 - Editors and clients cannot create root scenario rows. In the sheet API all four roles
@@ -62,9 +63,9 @@ List filters include repeatable `status`, `project_id`, `assigned_scenarist_id`,
   available pre-generation/final-client decision, comment, and pre-generation note fields.
   Row visibility remains role-scoped.
 
-Creation errors use stable semantics: `403` for a forbidden role or attempted cross-user
-assignment, `404` for a missing referenced entity, and `409` for an inactive entity,
-wrong assignment role, or duplicate business identifier.
+Creation errors use stable semantics: `403` for a forbidden creation role or attempted
+cross-user assignment during scenarist-created rows, `404` for a missing referenced entity,
+and `409` for an inactive entity, wrong assignment role, or duplicate business identifier.
 
 Google Sheets import will be a separate read-only adapter. It is intentionally not connected to the production server in this first local slice.
 

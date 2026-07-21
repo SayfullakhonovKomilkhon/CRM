@@ -85,6 +85,7 @@ class User(TimestampMixin, Base):
 
 class Client(TimestampMixin, Base):
     __tablename__ = "clients"
+    __table_args__ = (UniqueConstraint("external_id", name="uq_clients_external_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(255), unique=True)
@@ -116,6 +117,7 @@ class Scenario(TimestampMixin, Base):
     __tablename__ = "scenarios"
     __table_args__ = (
         UniqueConstraint("source_sheet_id", "source_tab", "external_id", name="uq_scenario_source"),
+        UniqueConstraint("project_id", "external_id", name="uq_scenario_project_external_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -288,6 +290,10 @@ class MontageTask(TimestampMixin, Base):
 
     scenario: Mapped[Scenario] = relationship(back_populates="montage")
     assigned_editor: Mapped[User | None] = relationship()
+
+    @property
+    def assigned_editor_name(self) -> str | None:
+        return self.assigned_editor.full_name if self.assigned_editor else None
 
 
 class Publication(TimestampMixin, Base):

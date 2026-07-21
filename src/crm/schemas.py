@@ -3,8 +3,9 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from crm.models import ApprovalDecision, ApprovalStage, Role, ScenarioStatus
 
@@ -19,6 +20,31 @@ class EditorStatus(StrEnum):
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
+
+
+class WriteModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+MAX_TEXT_LENGTH = 100_000
+MAX_COMMENT_LENGTH = 10_000
+MAX_URL_LENGTH = 2_048
+
+
+def normalize_http_url(value):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("URL must be a string")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > MAX_URL_LENGTH:
+        raise ValueError("URL is too long")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("URL must use http or https")
+    return normalized
 
 
 class Token(BaseModel):
@@ -41,7 +67,7 @@ class UserOptionRead(ORMModel):
 
 
 class ClientCreate(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     name: str = Field(min_length=1, max_length=255)
     external_id: str | None = Field(default=None, max_length=100)
@@ -55,7 +81,7 @@ class ClientRead(ORMModel):
 
 
 class ProjectCreate(BaseModel):
-    model_config = ConfigDict(str_strip_whitespace=True)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     client_id: uuid.UUID
     name: str = Field(min_length=1, max_length=255)
@@ -70,40 +96,46 @@ class ProjectRead(ORMModel):
     is_active: bool
 
 
-class ResearchPayload(BaseModel):
-    competitor_url: str | None = None
-    competitor_category: str | None = None
-    full_analysis: str | None = None
-    performance_metrics: str | None = None
-    transcription: str | None = None
-    timeline: str | None = None
-    why_viral: str | None = None
-    takeaways: str | None = None
-    improvements: str | None = None
-    replication_template: str | None = None
-    ai_analysis: str | None = None
+class ResearchPayload(WriteModel):
+    competitor_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
+    competitor_category: str | None = Field(default=None, max_length=255)
+    full_analysis: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    performance_metrics: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    transcription: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    timeline: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    why_viral: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    takeaways: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    improvements: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    replication_template: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    ai_analysis: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+
+    _validate_competitor_url = field_validator("competitor_url", mode="before")(
+        normalize_http_url
+    )
 
 
-class ContentPayload(BaseModel):
-    claude_context: str | None = None
-    cover_text: str | None = None
-    script_text: str | None = None
-    montage_brief: str | None = None
-    scenarist_comment: str | None = None
-    hook: str | None = None
-    retention: str | None = None
-    call_to_action: str | None = None
-    visual_notes: str | None = None
-    score_recommendations: str | None = None
-    ai_review: str | None = None
+class ContentPayload(WriteModel):
+    claude_context: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    cover_text: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    script_text: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    montage_brief: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    scenarist_comment: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    hook: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    retention: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    call_to_action: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    visual_notes: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    score_recommendations: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    ai_review: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
 
 
-class ScenarioCreate(BaseModel):
+class ScenarioCreate(WriteModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     project_id: uuid.UUID
     assigned_scenarist_id: uuid.UUID | None = None
     external_id: str | None = Field(default=None, max_length=100)
-    source_sheet_id: str | None = None
-    source_tab: str | None = None
+    source_sheet_id: str | None = Field(default=None, max_length=255)
+    source_tab: str | None = Field(default=None, max_length=255)
     source_row: int | None = Field(default=None, ge=1)
     scenario_date: date | None = None
     deadline: date | None = None
@@ -115,7 +147,9 @@ class ScenarioCreate(BaseModel):
     content: ContentPayload | None = None
 
 
-class ScenarioUpdate(BaseModel):
+class ScenarioUpdate(WriteModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     assigned_scenarist_id: uuid.UUID | None = None
     scenario_date: date | None = None
     deadline: date | None = None
@@ -145,10 +179,10 @@ class ApprovalRead(ORMModel):
     decided_at: datetime | None
 
 
-class ApprovalUpdate(BaseModel):
+class ApprovalUpdate(WriteModel):
     decision: ApprovalDecision
-    comment: str | None = None
-    note: str | None = None
+    comment: str | None = Field(default=None, max_length=MAX_COMMENT_LENGTH)
+    note: str | None = Field(default=None, max_length=MAX_COMMENT_LENGTH)
 
 
 class ProjectSummary(ORMModel):
@@ -158,12 +192,14 @@ class ProjectSummary(ORMModel):
 
 
 class ScenaristSummary(ORMModel):
-    id: uuid.UUID
+    id: uuid.UUID | None
     name: str
     initials: str
 
 
-class CommentCreate(BaseModel):
+class CommentCreate(WriteModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     text: str = Field(min_length=1, max_length=10_000)
     stage: str | None = Field(default=None, max_length=100)
 
@@ -180,22 +216,26 @@ class CommentRead(ORMModel):
 class MontageUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    source_material_url: str | None = None
-    client_brand_style: str | None = None
-    extra_brief: str | None = None
+    source_material_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
+    client_brand_style: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    extra_brief: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     assigned_editor_id: uuid.UUID | None = None
-    external_editor_name: str | None = None
-    price: Decimal | None = Field(default=None, ge=0)
+    external_editor_name: str | None = Field(default=None, max_length=255)
+    price: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
     payment_due_date: date | None = None
-    material_status: str | None = None
-    scenarist_material_comment: str | None = None
-    brief_compliance_status: str | None = None
+    material_status: str | None = Field(default=None, max_length=100)
+    scenarist_material_comment: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    brief_compliance_status: str | None = Field(default=None, max_length=100)
     ready_at: date | None = None
-    bot_visual_analysis: str | None = None
-    compliance_analysis: str | None = None
-    ai_analysis: str | None = None
-    scenarist_revision_status: str | None = None
-    scenarist_revision_comment: str | None = None
+    bot_visual_analysis: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    compliance_analysis: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    ai_analysis: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    scenarist_revision_status: str | None = Field(default=None, max_length=100)
+    scenarist_revision_comment: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+
+    _validate_source_material_url = field_validator("source_material_url", mode="before")(
+        normalize_http_url
+    )
 
 
 class MontageRead(ORMModel):
@@ -204,6 +244,7 @@ class MontageRead(ORMModel):
     client_brand_style: str | None
     extra_brief: str | None
     assigned_editor_id: uuid.UUID | None
+    assigned_editor_name: str | None
     external_editor_name: str | None
     price: Decimal | None
     payment_due_date: date | None
@@ -225,24 +266,32 @@ class MontageRead(ORMModel):
 class EditorMontageUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    ready_material_url: str | None = None
+    ready_material_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
     editor_status: EditorStatus | None = None
-    editor_comment: str | None = None
+    editor_comment: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+
+    _validate_ready_material_url = field_validator("ready_material_url", mode="before")(
+        normalize_http_url
+    )
 
 
-class PublicationUpdate(BaseModel):
-    description_dzen: str | None = None
-    description_youtube: str | None = None
-    description_tiktok: str | None = None
-    description_instagram: str | None = None
+class PublicationUpdate(WriteModel):
+    description_dzen: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    description_youtube: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    description_tiktok: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    description_instagram: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     publication_date: date | None = None
     is_published: bool | None = None
-    publisher_brief: str | None = None
-    instagram_url: str | None = None
-    engagement_metrics: str | None = None
-    publication_analysis: str | None = None
-    ai_social_descriptions: str | None = None
-    leia_script: str | None = None
+    publisher_brief: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    instagram_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
+    engagement_metrics: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    publication_analysis: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    ai_social_descriptions: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    leia_script: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+
+    _validate_instagram_url = field_validator("instagram_url", mode="before")(
+        normalize_http_url
+    )
 
 
 class PublicationRead(ORMModel):
@@ -351,12 +400,12 @@ class SheetScenarioPage(BaseModel):
     meta: PaginationMeta
 
 
-class SheetCellChange(BaseModel):
+class SheetCellChange(WriteModel):
     field: str = Field(min_length=1, max_length=100)
     value: Any = None
 
 
-class SheetRowPatch(BaseModel):
+class SheetRowPatch(WriteModel):
     expected_version: datetime
     changes: list[SheetCellChange] = Field(min_length=1, max_length=50)
 
