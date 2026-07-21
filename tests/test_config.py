@@ -21,3 +21,24 @@ def test_production_rejects_default_secret() -> None:
             app_env="production",
             app_secret_key="local-development-secret-change-me",
         )
+
+
+@pytest.mark.parametrize(
+    ("raw_origins", "expected"),
+    [
+        (
+            '["https://crm.example","http://localhost:5173"]',
+            ["https://crm.example", "http://localhost:5173"],
+        ),
+        (
+            "https://crm.example,http://localhost:5173",
+            ["https://crm.example", "http://localhost:5173"],
+        ),
+    ],
+)
+def test_cors_origins_accept_json_and_comma_separated_values(
+    raw_origins: str, expected: list[str]
+) -> None:
+    settings = Settings(_env_file=None, cors_origins=raw_origins)
+
+    assert settings.cors_origins == expected
