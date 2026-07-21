@@ -423,21 +423,14 @@ async def create_scenario(
         requested_scenarist,
     )
 
-    if payload.external_id:
-        duplicate = await session.scalar(
-            select(Scenario.id).where(
-                Scenario.project_id == payload.project_id,
-                Scenario.external_id == payload.external_id,
-            )
-        )
-        if duplicate is not None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Scenario external_id already exists in this project",
-            )
-
     data = payload.model_dump(exclude={"research", "content"})
     data["assigned_scenarist_id"] = assigned_scenarist_id
+    if session.get_bind().dialect.name != "postgresql":
+        existing_ids = await session.scalars(select(Scenario.external_id))
+        numeric_ids = [
+            int(value) for value in existing_ids if value is not None and value.isdecimal()
+        ]
+        data["external_id"] = str(max(numeric_ids, default=0) + 1)
     scenario = Scenario(**data)
     if payload.research:
         scenario.research = ScenarioResearch(**payload.research.model_dump())

@@ -133,7 +133,6 @@ class ScenarioCreate(WriteModel):
 
     project_id: uuid.UUID
     assigned_scenarist_id: uuid.UUID | None = None
-    external_id: str | None = Field(default=None, max_length=100)
     source_sheet_id: str | None = Field(default=None, max_length=255)
     source_tab: str | None = Field(default=None, max_length=255)
     source_row: int | None = Field(default=None, ge=1)
@@ -316,7 +315,7 @@ class ScenarioRead(ORMModel):
     id: uuid.UUID
     project_id: uuid.UUID
     assigned_scenarist_id: uuid.UUID | None
-    external_id: str | None
+    external_id: str
     source_tab: str | None
     source_row: int | None
     scenario_date: date | None
@@ -355,7 +354,7 @@ class SortOrder(StrEnum):
 class ScenarioListItem(BaseModel):
     id: uuid.UUID
     title: str
-    external_id: str | None
+    external_id: str
     project: ProjectSummary
     scenarist: ScenaristSummary | None
     speaker: str | None

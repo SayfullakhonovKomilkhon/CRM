@@ -8,6 +8,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Enum,
+    FetchedValue,
     ForeignKey,
     Integer,
     Numeric,
@@ -117,7 +118,7 @@ class Scenario(TimestampMixin, Base):
     __tablename__ = "scenarios"
     __table_args__ = (
         UniqueConstraint("source_sheet_id", "source_tab", "external_id", name="uq_scenario_source"),
-        UniqueConstraint("project_id", "external_id", name="uq_scenario_project_external_id"),
+        UniqueConstraint("external_id", name="uq_scenarios_external_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -125,7 +126,9 @@ class Scenario(TimestampMixin, Base):
     assigned_scenarist_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True
     )
-    external_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    external_id: Mapped[str] = mapped_column(
+        String(100), nullable=False, index=True, server_default=FetchedValue()
+    )
     source_sheet_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_tab: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
