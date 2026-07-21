@@ -18,15 +18,35 @@ from crm.schemas import (
 from crm.sheet import columns_for_role, editable_fields_for_role, values_for_role
 
 
-def test_all_roles_receive_the_same_sheet_columns() -> None:
+def test_internal_roles_receive_all_sheet_columns() -> None:
     columns_by_role = {
-        role: [column.field for column in columns_for_role(role)] for role in Role
+        role: [column.field for column in columns_for_role(role)]
+        for role in (Role.MANAGER, Role.SCENARIST, Role.EDITOR)
     }
 
     assert all(columns == columns_by_role[Role.MANAGER] for columns in columns_by_role.values())
-    assert "montage.price" in columns_by_role[Role.CLIENT]
-    assert "research.ai_analysis" in columns_by_role[Role.CLIENT]
     assert len(columns_by_role[Role.MANAGER]) == 78
+
+
+def test_client_receives_only_the_safe_16_column_projection_in_order() -> None:
+    assert [column.field for column in columns_for_role(Role.CLIENT)] == [
+        "scenario_date",
+        "external_id",
+        "speaker",
+        "content.script_text",
+        "approval.pre_generation_client.decision",
+        "approval.pre_generation_client.comment",
+        "approval.pre_generation_client.note",
+        "montage.ready_material_url",
+        "approval.final_client.decision",
+        "approval.final_client.comment",
+        "publication.description_dzen",
+        "publication.description_youtube",
+        "publication.description_tiktok",
+        "publication.description_instagram",
+        "publication.publication_date",
+        "publication.is_published",
+    ]
 
 
 def test_sheet_registry_contains_every_persisted_workflow_field() -> None:
@@ -93,7 +113,7 @@ def test_sheet_column_publishes_editor_status_options() -> None:
     assert column.allowed_values == [status.value for status in EditorStatus]
 
 
-def test_client_sheet_has_separate_note_and_readonly_decision_dates() -> None:
+def test_client_sheet_has_separate_note_and_no_internal_decision_dates() -> None:
     columns = {column.field for column in columns_for_role(Role.CLIENT)}
     scenario = SimpleNamespace(
         available_sections=["content", "approvals"],
@@ -102,8 +122,8 @@ def test_client_sheet_has_separate_note_and_readonly_decision_dates() -> None:
     editable = set(editable_fields_for_role(scenario, Role.CLIENT))
 
     assert "approval.pre_generation_client.note" in columns
-    assert "approval.pre_generation_client.decided_at" in columns
-    assert "approval.final_client.decided_at" in columns
+    assert "approval.pre_generation_client.decided_at" not in columns
+    assert "approval.final_client.decided_at" not in columns
     assert "approval.pre_generation_client.note" in editable
     assert "approval.pre_generation_client.decided_at" not in editable
     assert "approval.final_client.decided_at" not in editable
@@ -163,7 +183,7 @@ def test_internal_roles_can_edit_all_available_work_fields(role: Role) -> None:
     assert "approval.final_client.decided_at" not in editable
 
 
-def test_client_sees_all_columns_but_edits_only_owned_approvals() -> None:
+def test_client_edits_only_owned_approvals() -> None:
     scenario = SimpleNamespace(
         available_sections=["content", "approvals", "montage", "publication"],
         available_approval_stages=[
@@ -199,7 +219,7 @@ def test_all_internal_roles_can_reassign_scenarist_from_sheet() -> None:
     assert "assigned_scenarist_id" not in editable_fields_for_role(scenario, Role.CLIENT)
 
 
-def test_client_projection_hides_assignment_ids_but_keeps_names() -> None:
+def test_client_sheet_values_contain_only_safe_projection() -> None:
     scenario = SimpleNamespace(
         approvals=[],
         assigned_scenarist_id="scenarist-uuid",
@@ -211,9 +231,12 @@ def test_client_projection_hides_assignment_ids_but_keeps_names() -> None:
 
     values = values_for_role(scenario, Role.CLIENT)
 
-    assert values["assigned_scenarist_id"] is None
-    assert values["montage.assigned_editor_id"] is None
-    assert values["montage.assigned_editor_name"] == "Монтажёр"
+    assert list(values) == [column.field for column in columns_for_role(Role.CLIENT)]
+    assert "assigned_scenarist_id" not in values
+    assert "montage.assigned_editor_id" not in values
+    assert "montage.assigned_editor_name" not in values
+    assert "research.full_analysis" not in values
+    assert "montage.price" not in values
 
 
 def test_client_detail_projection_hides_assignment_ids_but_keeps_names() -> None:

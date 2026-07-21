@@ -340,8 +340,33 @@ SHEET_FIELDS = (
 
 SHEET_FIELD_MAP = {item.field: item for item in SHEET_FIELDS}
 
+CLIENT_SHEET_FIELD_NAMES = (
+    "scenario_date",
+    "external_id",
+    "speaker",
+    "content.script_text",
+    "approval.pre_generation_client.decision",
+    "approval.pre_generation_client.comment",
+    "approval.pre_generation_client.note",
+    "montage.ready_material_url",
+    "approval.final_client.decision",
+    "approval.final_client.comment",
+    "publication.description_dzen",
+    "publication.description_youtube",
+    "publication.description_tiktok",
+    "publication.description_instagram",
+    "publication.publication_date",
+    "publication.is_published",
+)
 
-def columns_for_role(_role: Role) -> list[SheetColumnRead]:
+
+def fields_for_role(role: Role) -> tuple[SheetFieldSpec, ...]:
+    if role == Role.CLIENT:
+        return tuple(SHEET_FIELD_MAP[name] for name in CLIENT_SHEET_FIELD_NAMES)
+    return SHEET_FIELDS
+
+
+def columns_for_role(role: Role) -> list[SheetColumnRead]:
     return [
         SheetColumnRead(
             field=item.field,
@@ -354,7 +379,7 @@ def columns_for_role(_role: Role) -> list[SheetColumnRead]:
                 else None
             ),
         )
-        for item in SHEET_FIELDS
+        for item in fields_for_role(role)
     ]
 
 
@@ -370,7 +395,7 @@ def _nested_value(value, path: str):
 def values_for_role(scenario: ScenarioRead, role: Role) -> dict[str, object]:
     values: dict[str, object] = {}
     approvals = {item.stage.value: item for item in scenario.approvals}
-    for item in SHEET_FIELDS:
+    for item in fields_for_role(role):
         if item.field.startswith("approval."):
             _, stage, attribute = item.field.split(".")
             value = getattr(approvals.get(stage), attribute, None)
@@ -378,11 +403,6 @@ def values_for_role(scenario: ScenarioRead, role: Role) -> dict[str, object]:
                 value = value.value
         else:
             value = _nested_value(scenario, item.field)
-        if role == Role.CLIENT and item.field in {
-            "assigned_scenarist_id",
-            "montage.assigned_editor_id",
-        }:
-            value = None
         if item.editor == "detail" and isinstance(value, str) and len(value) > 240:
             value = f"{value[:237]}…"
         values[item.field] = value

@@ -57,11 +57,11 @@ List filters include repeatable `status`, `project_id`, `assigned_scenarist_id`,
   available to manager, scenarist, and editor roles, but never to clients.
 - A scenarist can create a scenario only in an existing active project. The backend
   always assigns the new scenario to the authenticated scenarist.
-- Editors and clients cannot create root scenario rows. In the sheet API all four roles
-  receive the same working columns. Manager, scenarist, and editor may update every
-  inline/detail field once its workflow section is available. Client can update only the
-  available pre-generation/final-client decision, comment, and pre-generation note fields.
-  Row visibility remains role-scoped.
+- Editors and clients cannot create root scenario rows. Manager, scenarist, and editor receive
+  all 78 working sheet columns and may update every inline/detail field once its workflow
+  section is available. Client receives a separate safe 16-column projection and can update
+  only the available pre-generation/final-client decision, comment, and pre-generation note
+  fields. Row visibility remains role-scoped.
 
 Creation errors use stable semantics: `403` for a forbidden creation role or attempted
 cross-user assignment during scenarist-created rows, `404` for a missing referenced entity,

@@ -2,6 +2,8 @@
 
 Источник: клиентский лист со сценарием, двумя этапами согласования, готовым монтажом и
 публикационными описаниями. Клиент видит только проекты своей организации.
+API sheet-проекция содержит ровно 16 перечисленных ниже колонок в порядке разделов. Внутренние
+исследования, назначения, UUID пользователей, цена, ТЗ и анализ монтажа клиенту не отправляются.
 
 ## Поля от сценариста
 
@@ -42,12 +44,6 @@
 | Описание Instagram | `publications.description_instagram` | чтение |
 | Дата публикации | `publications.publication_date` | чтение |
 | Статус публикации | `publications.is_published` | чтение |
-| ТЗ для публициста | `publications.publisher_brief` | чтение |
-| Ссылка Instagram | `publications.instagram_url` | чтение |
-| Лайки / просмотры | `publications.engagement_metrics` | чтение |
-| Анализ публикации | `publications.publication_analysis` | чтение |
-| ИИ-описания сетей | `publications.ai_social_descriptions` | чтение |
-| Сценарий от Леи | `publications.leia_script` | чтение |
 
 Публикационные поля обновляет любая внутренняя роль. Для клиента они read-only.
 
