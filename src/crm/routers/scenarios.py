@@ -12,6 +12,7 @@ from sqlalchemy.orm import selectinload
 from crm.creation import (
     require_active_project,
     require_assignable_editor,
+    require_assignable_publisher,
     require_assignable_scenarist,
     resolve_scenarist_assignment,
 )
@@ -21,9 +22,13 @@ from crm.models import (
     ApprovalDecision,
     ApprovalStage,
     Client,
+    FinalClientRevisionGate,
+    GateDecision,
     MontageTask,
     Project,
     Publication,
+    PublicationReviewDecision,
+    PublisherStatus,
     Role,
     Scenario,
     ScenarioApproval,
@@ -42,12 +47,19 @@ from crm.schemas import (
     CommentRead,
     EditorMontageUpdate,
     EditorStatus,
+    FinalRevisionGateRead,
+    FinalRevisionGateUpdate,
+    GateManagerDecision,
     MontageRead,
     MontageUpdate,
     PaginationMeta,
     ProjectSummary,
+    PublicationManagerDecision,
+    PublicationManagerReviewUpdate,
+    PublicationPublisherUpdate,
     PublicationRead,
     PublicationUpdate,
+    PublisherActionStatus,
     ScenarioCreate,
     ScenarioListItem,
     ScenarioPage,
@@ -64,8 +76,11 @@ from crm.schemas import (
 )
 from crm.sheet import columns_for_role, editable_fields_for_role, values_for_role
 from crm.workflow import (
+    EDITOR_ACTION_STATUSES,
     EDITOR_VISIBLE_STATUSES,
+    PUBLISHER_VISIBLE_STATUSES,
     ROLE_APPROVAL_STAGES,
+    approval_for,
     is_approved,
     publication_section_available,
     require_stage_prerequisites,
@@ -86,13 +101,224 @@ LOAD_SCENARIO = (
     selectinload(Scenario.approvals),
     selectinload(Scenario.comments),
     selectinload(Scenario.montage).selectinload(MontageTask.assigned_editor),
-    selectinload(Scenario.publication),
+    selectinload(Scenario.publication).selectinload(Publication.assigned_publisher),
+    selectinload(Scenario.final_revision_gate),
 )
 
 CLIENT_APPROVAL_STAGES = {
     ApprovalStage.PRE_GENERATION_CLIENT,
     ApprovalStage.FINAL_CLIENT,
 }
+
+REVISION_COMMENT_STAGES = {
+    *CLIENT_APPROVAL_STAGES,
+    ApprovalStage.SOURCE_MATERIAL,
+    ApprovalStage.MONTAGE_COMPLIANCE,
+}
+
+
+def require_approval_comment(
+    stage: ApprovalStage, decision: ApprovalDecision, comment: str | None
+) -> None:
+    if (
+        stage in REVISION_COMMENT_STAGES
+        and decision in {ApprovalDecision.REVISION, ApprovalDecision.REJECTED}
+        and not (comment or "").strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="A revision decision requires a comment",
+        )
+
+
+def require_source_editor_assignment(
+    scenario: Scenario, stage: ApprovalStage, decision: ApprovalDecision
+) -> None:
+    if (
+        stage == ApprovalStage.SOURCE_MATERIAL
+        and decision == ApprovalDecision.APPROVED
+        and (scenario.montage is None or scenario.montage.assigned_editor_id is None)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Assign an editor before approving source material",
+        )
+
+
+def open_final_revision_gate(scenario: Scenario, request_comment: str) -> None:
+    gate = scenario.final_revision_gate
+    if gate is None:
+        gate = FinalClientRevisionGate()
+        scenario.final_revision_gate = gate
+    gate.decision = GateDecision.PENDING
+    gate.request_comment = request_comment
+    gate.manager_comment = None
+    gate.decided_by_id = None
+    gate.decided_at = None
+
+
+def publication_content_ready(publication: Publication | None) -> bool:
+    return bool(
+        publication
+        and any(
+            (
+                publication.description_dzen,
+                publication.description_youtube,
+                publication.description_tiktok,
+                publication.description_instagram,
+            )
+        )
+    )
+
+
+def reset_publication_review(publication: Publication) -> None:
+    publication.manager_review_decision = PublicationReviewDecision.PENDING
+    publication.manager_review_comment = None
+    publication.manager_reviewed_by_id = None
+    publication.manager_reviewed_at = None
+    publication.assigned_publisher_id = None
+    publication.publisher_status = PublisherStatus.PENDING
+    publication.publisher_comment = None
+    publication.is_published = False
+    publication.published_at = None
+
+
+def apply_final_revision_gate_decision(
+    scenario: Scenario,
+    decision: GateManagerDecision,
+    comment: str,
+    manager: User,
+) -> FinalClientRevisionGate:
+    gate = scenario.final_revision_gate
+    final_approval = approval_for(scenario, ApprovalStage.FINAL_CLIENT)
+    if gate is None or final_approval is None or final_approval.decision not in {
+        ApprovalDecision.REVISION,
+        ApprovalDecision.REJECTED,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="There is no pending final client revision request",
+        )
+    if gate.decision != GateDecision.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Final revision gate is already decided",
+        )
+    if not comment.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Manager gate comment is required",
+        )
+
+    gate.decision = GateDecision(decision.value)
+    gate.manager_comment = comment
+    gate.decided_by_id = manager.id
+    gate.decided_at = datetime.now(UTC)
+    if gate.decision == GateDecision.APPROVED:
+        reset_approvals_from(scenario, ApprovalStage.MONTAGE_COMPLIANCE)
+        scenario.status = ScenarioStatus.EDITING
+    else:
+        final_approval.decision = ApprovalDecision.PENDING
+        final_approval.decided_by_id = None
+        final_approval.decided_at = None
+        scenario.status = ScenarioStatus.CLIENT_REVIEW
+    return gate
+
+
+async def apply_publication_manager_review(
+    session: AsyncSession,
+    scenario: Scenario,
+    decision: PublicationManagerDecision,
+    comment: str | None,
+    assigned_publisher_id: uuid.UUID | None,
+    manager: User,
+) -> Publication:
+    if (
+        scenario.publication is not None
+        and scenario.publication.manager_review_decision
+        == PublicationReviewDecision.APPROVED
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Publication review is already approved; edit publication content to reopen it",
+        )
+    if decision == PublicationManagerDecision.REVISION and not (comment or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Publication revision requires a manager comment",
+        )
+    if not is_approved(scenario, ApprovalStage.FINAL_CLIENT):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Final client approval is required before publication review",
+        )
+    if not publication_content_ready(scenario.publication):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="At least one publication description is required",
+        )
+    publication = scenario.publication
+    publication.manager_review_decision = PublicationReviewDecision(decision.value)
+    publication.manager_review_comment = comment
+    publication.manager_reviewed_by_id = manager.id
+    publication.manager_reviewed_at = datetime.now(UTC)
+    publication.is_published = False
+    publication.published_at = None
+    if publication.manager_review_decision == PublicationReviewDecision.APPROVED:
+        if assigned_publisher_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="assigned_publisher_id is required for approval",
+            )
+        publisher = require_assignable_publisher(
+            await session.get(User, assigned_publisher_id)
+        )
+        publication.assigned_publisher_id = publisher.id
+        publication.publisher_status = PublisherStatus.ASSIGNED
+        scenario.status = ScenarioStatus.READY_TO_PUBLISH
+    else:
+        publication.assigned_publisher_id = None
+        publication.publisher_status = PublisherStatus.PENDING
+        scenario.status = ScenarioStatus.APPROVED
+    return publication
+
+
+def apply_publisher_action(
+    scenario: Scenario,
+    status_value: PublisherActionStatus,
+    comment: str | None,
+    urls: dict[str, str | None],
+) -> Publication:
+    publication = scenario.publication
+    if publication is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Publication is missing")
+    for key, value in urls.items():
+        setattr(publication, key, value)
+    publication.publisher_comment = comment
+    publication.publisher_status = PublisherStatus(status_value.value)
+    if publication.publisher_status == PublisherStatus.PUBLISHED:
+        if not any(
+            (
+                publication.dzen_url,
+                publication.youtube_url,
+                publication.tiktok_url,
+                publication.instagram_url,
+            )
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="At least one published URL is required",
+            )
+        now = datetime.now(UTC)
+        publication.is_published = True
+        publication.published_at = publication.published_at or now
+        publication.first_published_at = publication.first_published_at or now
+        publication.publication_date = publication.publication_date or now.date()
+        scenario.status = ScenarioStatus.PUBLISHED
+    else:
+        publication.is_published = False
+        scenario.status = ScenarioStatus.READY_TO_PUBLISH
+    return publication
 
 def apply_visibility(query, user: User):
     if user.role == Role.SCENARIST:
@@ -106,6 +332,11 @@ def apply_visibility(query, user: User):
         )
     if user.role == Role.CLIENT:
         return query.where(Scenario.project.has(Project.client_id == user.client_id))
+    if user.role == Role.PUBLISHER:
+        return query.where(
+            Scenario.publication.has(Publication.assigned_publisher_id == user.id),
+            Scenario.status.in_(PUBLISHER_VISIBLE_STATUSES),
+        )
     return query
 
 
@@ -142,7 +373,7 @@ def scenario_for_role(scenario: Scenario, user: User) -> ScenarioRead:
         available_sections.append("montage")
     if publication_section_available(scenario):
         available_sections.append("publication")
-    if user.role in {Role.MANAGER, Role.SCENARIST, Role.EDITOR}:
+    if user.role in {Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER}:
         available_sections.append("history")
 
     updates = {
@@ -156,6 +387,17 @@ def scenario_for_role(scenario: Scenario, user: User) -> ScenarioRead:
         if result.montage is not None:
             updates["montage"] = result.montage.model_copy(
                 update={"assigned_editor_id": None}
+            )
+        if result.publication is not None:
+            updates["publication"] = result.publication.model_copy(
+                update={
+                    "assigned_publisher_id": None,
+                    "manager_reviewed_by_id": None,
+                }
+            )
+        if result.final_revision_gate is not None:
+            updates["final_revision_gate"] = result.final_revision_gate.model_copy(
+                update={"decided_by_id": None}
             )
 
     result = result.model_copy(update=updates)
@@ -456,7 +698,11 @@ SHEET_DATE_FIELDS = {
     "montage.ready_at",
     "publication.publication_date",
 }
-SHEET_UUID_FIELDS = {"assigned_scenarist_id", "montage.assigned_editor_id"}
+SHEET_UUID_FIELDS = {
+    "assigned_scenarist_id",
+    "montage.assigned_editor_id",
+    "publication.assigned_publisher_id",
+}
 SHEET_DECIMAL_FIELDS = {"montage.price"}
 SHEET_INTEGER_FIELDS = {"score"}
 SHEET_BOOLEAN_FIELDS = {"publication.is_published"}
@@ -465,6 +711,9 @@ SHEET_URL_FIELDS = {
     "montage.source_material_url",
     "montage.ready_material_url",
     "publication.instagram_url",
+    "publication.dzen_url",
+    "publication.youtube_url",
+    "publication.tiktok_url",
 }
 SHEET_STRING_LIMITS = {
     "scenario_type": 100,
@@ -475,6 +724,23 @@ SHEET_STRING_LIMITS = {
     "montage.material_status": 100,
     "montage.brief_compliance_status": 100,
     "montage.scenarist_revision_status": 100,
+}
+SHEET_GATE_FIELDS = {
+    "final_revision_gate.decision",
+    "final_revision_gate.manager_comment",
+}
+SHEET_PUBLICATION_REVIEW_FIELDS = {
+    "publication.assigned_publisher_id",
+    "publication.manager_review_decision",
+    "publication.manager_review_comment",
+}
+SHEET_PUBLISHER_FIELDS = {
+    "publication.publisher_status",
+    "publication.publisher_comment",
+    "publication.dzen_url",
+    "publication.youtube_url",
+    "publication.tiktok_url",
+    "publication.instagram_url",
 }
 
 
@@ -488,6 +754,19 @@ def coerce_sheet_value(field: str, value):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="Invalid montage.editor_status",
+            ) from error
+    if field == "publication.publisher_status":
+        if value is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="publication.publisher_status cannot be null",
+            )
+        try:
+            return PublisherStatus(PublisherActionStatus(value).value)
+        except (TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid publication.publisher_status",
             ) from error
     if value == "" and field in (
         SHEET_DATE_FIELDS | SHEET_UUID_FIELDS | SHEET_DECIMAL_FIELDS | SHEET_INTEGER_FIELDS
@@ -580,18 +859,28 @@ async def patch_scenario_sheet_row(
         )
 
     approval_changes: dict[ApprovalStage, dict[str, object]] = {}
+    gate_changes = {}
+    publication_review_changes = {}
+    publisher_changes = {}
     regular_changes = []
     for change in payload.changes:
         if change.field.startswith("approval."):
             _, stage_value, attribute = change.field.split(".")
             stage = ApprovalStage(stage_value)
             approval_changes.setdefault(stage, {})[attribute] = change.value
+        elif change.field in SHEET_GATE_FIELDS:
+            gate_changes[change.field.rsplit(".", 1)[1]] = change.value
+        elif change.field in SHEET_PUBLICATION_REVIEW_FIELDS:
+            publication_review_changes[change.field.rsplit(".", 1)[1]] = change.value
+        elif change.field in SHEET_PUBLISHER_FIELDS:
+            publisher_changes[change.field.rsplit(".", 1)[1]] = change.value
         else:
             regular_changes.append(change)
 
     script_changed = False
     source_material_changed = False
     ready_material_changed = False
+    publisher_status_changed = False
     for change in regular_changes:
         value = coerce_sheet_value(change.field, change.value)
         if change.field == "assigned_scenarist_id":
@@ -630,6 +919,9 @@ async def patch_scenario_sheet_row(
         )
         ready_material_changed |= (
             change.field == "montage.ready_material_url" and old_value != value
+        )
+        publisher_status_changed |= (
+            change.field == "publication.publisher_status" and old_value != value
         )
         setattr(target, attribute, value)
 
@@ -693,6 +985,8 @@ async def patch_scenario_sheet_row(
                     status_code=422, detail=f"Invalid decision for {stage.value}"
                 ) from error
             require_stage_prerequisites(scenario, stage)
+            require_approval_comment(stage, decision, approval.comment)
+            require_source_editor_assignment(scenario, stage, decision)
             approval.decision = decision
             approval.decided_by_id = None if decision == ApprovalDecision.PENDING else user.id
             approval.decided_at = (
@@ -700,7 +994,128 @@ async def patch_scenario_sheet_row(
             )
             if decision != ApprovalDecision.APPROVED:
                 reset_downstream_approvals(scenario, stage)
+            if stage == ApprovalStage.FINAL_CLIENT and decision in {
+                ApprovalDecision.REVISION,
+                ApprovalDecision.REJECTED,
+            }:
+                open_final_revision_gate(scenario, approval.comment or "")
             scenario.status = status_after_decision(scenario, stage, decision)
+
+    if gate_changes:
+        gate = scenario.final_revision_gate
+        if gate is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Final revision gate not found",
+            )
+        if "manager_comment" in gate_changes:
+            comment = gate_changes["manager_comment"]
+            if not isinstance(comment, str) or len(comment) > MAX_COMMENT_LENGTH:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid manager gate comment",
+                )
+            gate.manager_comment = comment
+        if "decision" in gate_changes:
+            try:
+                gate_decision = GateManagerDecision(gate_changes["decision"])
+            except (TypeError, ValueError) as error:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid final revision gate decision",
+                ) from error
+            apply_final_revision_gate_decision(
+                scenario,
+                gate_decision,
+                gate.manager_comment or "",
+                user,
+            )
+
+    if publication_review_changes:
+        if scenario.publication is None:
+            scenario.publication = Publication()
+        publication = scenario.publication
+        if "manager_review_comment" in publication_review_changes:
+            comment = publication_review_changes["manager_review_comment"]
+            if comment is not None and (
+                not isinstance(comment, str) or len(comment) > MAX_COMMENT_LENGTH
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid publication manager comment",
+                )
+            publication.manager_review_comment = comment
+        if "assigned_publisher_id" in publication_review_changes:
+            publisher_id = coerce_sheet_value(
+                "publication.assigned_publisher_id",
+                publication_review_changes["assigned_publisher_id"],
+            )
+            if publisher_id is not None:
+                publisher_id = require_assignable_publisher(
+                    await session.get(User, publisher_id)
+                ).id
+            publication.assigned_publisher_id = publisher_id
+        if "manager_review_decision" in publication_review_changes:
+            try:
+                review_decision = PublicationManagerDecision(
+                    publication_review_changes["manager_review_decision"]
+                )
+            except (TypeError, ValueError) as error:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid publication manager decision",
+                ) from error
+            await apply_publication_manager_review(
+                session,
+                scenario,
+                review_decision,
+                publication.manager_review_comment,
+                publication.assigned_publisher_id,
+                user,
+            )
+
+    if publisher_changes:
+        publication = scenario.publication
+        if publication is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Publication is missing",
+            )
+        urls = {}
+        for key in ("dzen_url", "youtube_url", "tiktok_url", "instagram_url"):
+            if key in publisher_changes:
+                urls[key] = coerce_sheet_value(
+                    f"publication.{key}", publisher_changes[key]
+                )
+        if "publisher_comment" in publisher_changes:
+            publisher_comment = publisher_changes["publisher_comment"]
+            if publisher_comment is not None and (
+                not isinstance(publisher_comment, str)
+                or len(publisher_comment) > MAX_COMMENT_LENGTH
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid publisher comment",
+                )
+            publication.publisher_comment = publisher_comment
+        for key, value in urls.items():
+            setattr(publication, key, value)
+        if "publisher_status" in publisher_changes:
+            try:
+                publisher_action = PublisherActionStatus(
+                    publisher_changes["publisher_status"]
+                )
+            except (TypeError, ValueError) as error:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid publisher status",
+                ) from error
+            apply_publisher_action(
+                scenario,
+                publisher_action,
+                publication.publisher_comment,
+                {},
+            )
 
     approval_decision_changed = any(
         field.startswith("approval.") and field.endswith(".decision") for field in fields
@@ -732,7 +1147,34 @@ async def patch_scenario_sheet_row(
     ):
         scenario.status = ScenarioStatus.HANDED_TO_EDITOR
     if scenario.publication:
-        if scenario.publication.is_published:
+        if user.role == Role.PUBLISHER and publisher_status_changed:
+            if scenario.publication.publisher_status == PublisherStatus.PUBLISHED:
+                if not any(
+                    (
+                        scenario.publication.dzen_url,
+                        scenario.publication.youtube_url,
+                        scenario.publication.tiktok_url,
+                        scenario.publication.instagram_url,
+                    )
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="At least one published URL is required",
+                    )
+                now = datetime.now(UTC)
+                scenario.publication.is_published = True
+                scenario.publication.published_at = scenario.publication.published_at or now
+                scenario.publication.first_published_at = (
+                    scenario.publication.first_published_at or now
+                )
+                scenario.publication.publication_date = (
+                    scenario.publication.publication_date or now.date()
+                )
+                scenario.status = ScenarioStatus.PUBLISHED
+            else:
+                scenario.publication.is_published = False
+                scenario.status = ScenarioStatus.READY_TO_PUBLISH
+        elif scenario.publication.is_published:
             scenario.publication.first_published_at = (
                 scenario.publication.first_published_at or datetime.now(UTC)
             )
@@ -771,6 +1213,11 @@ async def update_scenario(
 
     changes = payload.model_dump(exclude_unset=True, exclude={"research", "content"})
     if "assigned_scenarist_id" in changes:
+        if user.role != Role.MANAGER:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only manager can reassign a scenarist",
+            )
         requested_scenarist_id = changes.pop("assigned_scenarist_id")
         if requested_scenarist_id is None:
             scenario.assigned_scenarist_id = None
@@ -827,6 +1274,8 @@ async def set_approval(
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
     require_stage_role(user.role, stage)
     require_stage_prerequisites(scenario, stage)
+    require_approval_comment(stage, payload.decision, payload.comment)
+    require_source_editor_assignment(scenario, stage, payload.decision)
     if (
         "note" in payload.model_fields_set
         and stage != ApprovalStage.PRE_GENERATION_CLIENT
@@ -859,11 +1308,57 @@ async def set_approval(
     )
     if payload.decision != ApprovalDecision.APPROVED:
         reset_downstream_approvals(scenario, stage)
+    if stage == ApprovalStage.FINAL_CLIENT and payload.decision in {
+        ApprovalDecision.REVISION,
+        ApprovalDecision.REJECTED,
+    }:
+        open_final_revision_gate(scenario, payload.comment or "")
     scenario.status = status_after_decision(scenario, stage, payload.decision)
     scenario.updated_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(approval)
     return approval
+
+
+@router.get(
+    "/{scenario_id}/final-revision-gate",
+    response_model=FinalRevisionGateRead,
+)
+async def get_final_revision_gate(
+    scenario_id: uuid.UUID,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+) -> FinalRevisionGateRead:
+    scenario = await get_visible_scenario(session, scenario_id, user)
+    if scenario.final_revision_gate is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Final revision gate not found",
+        )
+    result = FinalRevisionGateRead.model_validate(scenario.final_revision_gate)
+    if user.role == Role.CLIENT:
+        result = result.model_copy(update={"decided_by_id": None})
+    return result
+
+
+@router.put(
+    "/{scenario_id}/final-revision-gate",
+    response_model=FinalRevisionGateRead,
+)
+async def decide_final_revision_gate(
+    scenario_id: uuid.UUID,
+    payload: FinalRevisionGateUpdate,
+    user: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> FinalClientRevisionGate:
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+    gate = apply_final_revision_gate_decision(
+        scenario, payload.decision, payload.comment, user
+    )
+    scenario.updated_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(gate)
+    return gate
 
 
 @router.get("/{scenario_id}/comments", response_model=list[CommentRead])
@@ -927,6 +1422,11 @@ async def update_montage(
     if scenario.montage is None:
         scenario.montage = MontageTask()
     montage_changes = payload.model_dump(exclude_unset=True)
+    if "assigned_editor_id" in montage_changes and user.role != Role.MANAGER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only manager can assign an editor",
+        )
     if (
         "assigned_editor_id" in montage_changes
         and montage_changes["assigned_editor_id"] is not None
@@ -947,22 +1447,27 @@ async def update_montage(
         scenario.status = ScenarioStatus.HANDED_TO_EDITOR
     scenario.updated_at = datetime.now(UTC)
     await session.commit()
-    await session.refresh(scenario.montage)
-    return scenario.montage
+    updated = await get_visible_scenario(session, scenario.id, user)
+    return updated.montage
 
 
 @router.put("/{scenario_id}/montage/editor", response_model=MontageRead)
 async def update_montage_as_editor(
     scenario_id: uuid.UUID,
     payload: EditorMontageUpdate,
-    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
+    user: User = Depends(require_roles(Role.EDITOR)),
     session: AsyncSession = Depends(get_session),
 ) -> MontageTask:
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
-    if scenario.montage is None or not is_approved(scenario, ApprovalStage.SOURCE_MATERIAL):
+    if (
+        scenario.montage is None
+        or scenario.montage.assigned_editor_id != user.id
+        or not is_approved(scenario, ApprovalStage.SOURCE_MATERIAL)
+        or scenario.status not in EDITOR_ACTION_STATUSES
+    ):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Source material must be approved before montage result",
+            detail="Montage result is not available at the current assigned editor stage",
         )
     editor_changes = payload.model_dump(exclude_unset=True)
     ready_material_changed = (
@@ -995,16 +1500,73 @@ async def update_publication(
         )
     if scenario.publication is None:
         scenario.publication = Publication()
-    for key, value in payload.model_dump(exclude_unset=True).items():
+    publication_changes = payload.model_dump(exclude_unset=True)
+    changed = any(
+        getattr(scenario.publication, key) != value
+        for key, value in publication_changes.items()
+    )
+    for key, value in publication_changes.items():
         setattr(scenario.publication, key, value)
-    if scenario.publication.is_published:
-        scenario.publication.first_published_at = (
-            scenario.publication.first_published_at or datetime.now(UTC)
-        )
-        scenario.status = ScenarioStatus.PUBLISHED
-    elif scenario.status == ScenarioStatus.PUBLISHED:
-        scenario.status = status_after_unpublishing(scenario)
+    if changed:
+        reset_publication_review(scenario.publication)
+        scenario.status = ScenarioStatus.APPROVED
     scenario.updated_at = datetime.now(UTC)
     await session.commit()
     await session.refresh(scenario.publication)
     return scenario.publication
+
+
+@router.put(
+    "/{scenario_id}/publication/manager-review",
+    response_model=PublicationRead,
+)
+async def review_publication(
+    scenario_id: uuid.UUID,
+    payload: PublicationManagerReviewUpdate,
+    user: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> Publication:
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+    await apply_publication_manager_review(
+        session,
+        scenario,
+        payload.decision,
+        payload.comment,
+        payload.assigned_publisher_id,
+        user,
+    )
+    scenario.updated_at = datetime.now(UTC)
+    await session.commit()
+    updated = await get_visible_scenario(session, scenario.id, user)
+    return updated.publication
+
+
+@router.put(
+    "/{scenario_id}/publication/publisher",
+    response_model=PublicationRead,
+)
+async def update_publication_as_publisher(
+    scenario_id: uuid.UUID,
+    payload: PublicationPublisherUpdate,
+    user: User = Depends(require_roles(Role.PUBLISHER)),
+    session: AsyncSession = Depends(get_session),
+) -> Publication:
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+    publication = scenario.publication
+    if (
+        publication is None
+        or publication.assigned_publisher_id != user.id
+        or publication.manager_review_decision != PublicationReviewDecision.APPROVED
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Publication is not assigned and approved for this publisher",
+        )
+    urls = payload.model_dump(exclude_unset=True, exclude={"status", "comment"})
+    publication = apply_publisher_action(
+        scenario, payload.status, payload.comment, urls
+    )
+    scenario.updated_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(publication)
+    return publication

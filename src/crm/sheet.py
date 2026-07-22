@@ -1,8 +1,22 @@
 from dataclasses import dataclass
 from typing import Literal
 
-from crm.models import ApprovalStage, Role
-from crm.schemas import EditorStatus, ScenarioRead, SheetColumnRead
+from crm.models import (
+    ApprovalStage,
+    GateDecision,
+    PublicationReviewDecision,
+    Role,
+    ScenarioStatus,
+)
+from crm.schemas import (
+    EditorStatus,
+    GateManagerDecision,
+    PublicationManagerDecision,
+    PublisherActionStatus,
+    ScenarioRead,
+    SheetColumnRead,
+)
+from crm.workflow import EDITOR_ACTION_STATUSES, ROLE_APPROVAL_STAGES
 
 EditorKind = Literal["inline", "detail", "readonly"]
 
@@ -17,7 +31,7 @@ class SheetFieldSpec:
 
 
 ALL_ROLES = frozenset(Role)
-INTERNAL_ROLES = frozenset({Role.MANAGER, Role.SCENARIST, Role.EDITOR})
+INTERNAL_ROLES = frozenset({Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER})
 PRODUCTION_ROLES = INTERNAL_ROLES
 
 
@@ -257,14 +271,72 @@ SHEET_FIELDS = (
         frozenset({Role.CLIENT, Role.MANAGER, Role.SCENARIST}),
     ),
     field(
+        "final_revision_gate.request_comment",
+        "Запрос клиента на доработку",
+        "Проверка",
+        ALL_ROLES,
+    ),
+    field(
+        "final_revision_gate.decision",
+        "Решение менеджера по доработке",
+        "Проверка",
+        ALL_ROLES,
+        "inline",
+    ),
+    field(
+        "final_revision_gate.manager_comment",
+        "Ответ менеджера клиенту",
+        "Проверка",
+        ALL_ROLES,
+        "detail",
+    ),
+    field(
+        "final_revision_gate.decided_at",
+        "Дата решения менеджера",
+        "Проверка",
+        ALL_ROLES,
+    ),
+    field(
         "publication.publication_date",
         "Дата публикации",
         "Публикация",
         frozenset({Role.CLIENT, Role.MANAGER, Role.SCENARIST}),
-        "inline",
     ),
     field(
         "publication.publisher_brief", "ТЗ для публициста", "Публикация", INTERNAL_ROLES, "detail"
+    ),
+    field(
+        "publication.assigned_publisher_id",
+        "Назначить публициста",
+        "Публикация",
+        INTERNAL_ROLES,
+        "inline",
+    ),
+    field(
+        "publication.assigned_publisher_name",
+        "Публицист",
+        "Публикация",
+        ALL_ROLES,
+    ),
+    field(
+        "publication.manager_review_decision",
+        "Проверка публикации менеджером",
+        "Публикация",
+        INTERNAL_ROLES,
+        "inline",
+    ),
+    field(
+        "publication.manager_review_comment",
+        "Комментарий менеджера к публикации",
+        "Публикация",
+        INTERNAL_ROLES,
+        "detail",
+    ),
+    field(
+        "publication.manager_reviewed_at",
+        "Дата проверки публикации",
+        "Публикация",
+        INTERNAL_ROLES,
     ),
     field(
         "publication.description_dzen",
@@ -299,7 +371,6 @@ SHEET_FIELDS = (
         "Опубликовано",
         "Публикация",
         frozenset({Role.CLIENT, Role.MANAGER, Role.SCENARIST}),
-        "inline",
     ),
     field(
         "publication.instagram_url",
@@ -307,6 +378,47 @@ SHEET_FIELDS = (
         "Публикация",
         frozenset({Role.CLIENT, Role.MANAGER, Role.SCENARIST}),
         "inline",
+    ),
+    field(
+        "publication.dzen_url",
+        "Ссылка Dzen",
+        "Публикация",
+        ALL_ROLES,
+        "inline",
+    ),
+    field(
+        "publication.youtube_url",
+        "Ссылка YouTube",
+        "Публикация",
+        ALL_ROLES,
+        "inline",
+    ),
+    field(
+        "publication.tiktok_url",
+        "Ссылка TikTok",
+        "Публикация",
+        ALL_ROLES,
+        "inline",
+    ),
+    field(
+        "publication.publisher_status",
+        "Статус публикации",
+        "Публикация",
+        ALL_ROLES,
+        "inline",
+    ),
+    field(
+        "publication.publisher_comment",
+        "Комментарий публициста",
+        "Публикация",
+        ALL_ROLES,
+        "detail",
+    ),
+    field(
+        "publication.published_at",
+        "Опубликовано в",
+        "Публикация",
+        ALL_ROLES,
     ),
     field(
         "publication.engagement_metrics",
@@ -351,12 +463,20 @@ CLIENT_SHEET_FIELD_NAMES = (
     "montage.ready_material_url",
     "approval.final_client.decision",
     "approval.final_client.comment",
+    "final_revision_gate.decision",
+    "final_revision_gate.manager_comment",
     "publication.description_dzen",
     "publication.description_youtube",
     "publication.description_tiktok",
     "publication.description_instagram",
     "publication.publication_date",
     "publication.is_published",
+    "publication.publisher_status",
+    "publication.dzen_url",
+    "publication.youtube_url",
+    "publication.tiktok_url",
+    "publication.instagram_url",
+    "publication.published_at",
 )
 
 
@@ -376,6 +496,12 @@ def columns_for_role(role: Role) -> list[SheetColumnRead]:
             allowed_values=(
                 [status.value for status in EditorStatus]
                 if item.field == "montage.editor_status"
+                else [status.value for status in PublisherActionStatus]
+                if item.field == "publication.publisher_status"
+                else [status.value for status in PublicationManagerDecision]
+                if item.field == "publication.manager_review_decision"
+                else [status.value for status in GateManagerDecision]
+                if item.field == "final_revision_gate.decision"
                 else None
             ),
         )
@@ -419,20 +545,98 @@ def editable_fields_for_role(scenario: ScenarioRead, role: Role) -> list[str]:
                 editable.add("approval.pre_generation_client.note")
         return sorted(editable)
 
+    if role == Role.PUBLISHER:
+        publication = getattr(scenario, "publication", None)
+        if (
+            publication is None
+            or publication.manager_review_decision != PublicationReviewDecision.APPROVED
+        ):
+            return []
+        return sorted(
+            {
+                "publication.publisher_status",
+                "publication.publisher_comment",
+                "publication.dzen_url",
+                "publication.youtube_url",
+                "publication.tiktok_url",
+                "publication.instagram_url",
+            }
+        )
+
     editable = set()
     available_approval_stages = set(scenario.available_approval_stages)
     available_sections = set(scenario.available_sections)
     for item in SHEET_FIELDS:
         if item.editor == "readonly":
             continue
+        if item.field == "assigned_scenarist_id" and role != Role.MANAGER:
+            continue
+        if item.field == "montage.assigned_editor_id" and role != Role.MANAGER:
+            continue
+        if item.field in {
+            "montage.ready_material_url",
+            "montage.editor_status",
+            "montage.editor_comment",
+        }:
+            if role != Role.EDITOR or getattr(
+                scenario, "status", ScenarioStatus.EDITING
+            ) not in EDITOR_ACTION_STATUSES:
+                continue
+        if item.field in {
+            "publication.publisher_status",
+            "publication.publisher_comment",
+            "publication.dzen_url",
+            "publication.youtube_url",
+            "publication.tiktok_url",
+            "publication.instagram_url",
+        }:
+            continue
+        if item.field in {
+            "final_revision_gate.decision",
+            "final_revision_gate.manager_comment",
+            "publication.assigned_publisher_id",
+            "publication.manager_review_decision",
+            "publication.manager_review_comment",
+        }:
+            continue
         if item.field.startswith("approval."):
             _, stage_value, _ = item.field.split(".")
-            if ApprovalStage(stage_value) not in available_approval_stages:
+            stage = ApprovalStage(stage_value)
+            if (
+                stage not in available_approval_stages
+                or stage not in ROLE_APPROVAL_STAGES.get(role, set())
+            ):
                 continue
         elif item.field.startswith("montage.") and "montage" not in available_sections:
             continue
         elif item.field.startswith("publication.") and "publication" not in available_sections:
             continue
         editable.add(item.field)
+
+    if role == Role.MANAGER:
+        gate = getattr(scenario, "final_revision_gate", None)
+        if gate is not None and gate.decision == GateDecision.PENDING:
+            editable.update(
+                {
+                    "final_revision_gate.decision",
+                    "final_revision_gate.manager_comment",
+                }
+            )
+        publication = getattr(scenario, "publication", None)
+        if (
+            "publication" in available_sections
+            and (
+                publication is None
+                or publication.manager_review_decision
+                != PublicationReviewDecision.APPROVED
+            )
+        ):
+            editable.update(
+                {
+                    "publication.assigned_publisher_id",
+                    "publication.manager_review_decision",
+                    "publication.manager_review_comment",
+                }
+            )
 
     return sorted(editable)

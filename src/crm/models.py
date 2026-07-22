@@ -27,6 +27,7 @@ class Role(StrEnum):
     MANAGER = "manager"
     EDITOR = "editor"
     CLIENT = "client"
+    PUBLISHER = "publisher"
 
 
 class ScenarioStatus(StrEnum):
@@ -38,6 +39,8 @@ class ScenarioStatus(StrEnum):
     HANDED_TO_EDITOR = "handed_to_editor"
     EDITING = "editing"
     CLIENT_REVIEW = "client_review"
+    MANAGER_REVISION_REVIEW = "manager_revision_review"
+    READY_TO_PUBLISH = "ready_to_publish"
     PUBLISHED = "published"
     ARCHIVED = "archived"
 
@@ -55,6 +58,25 @@ class ApprovalDecision(StrEnum):
     APPROVED = "approved"
     REVISION = "revision"
     REJECTED = "rejected"
+
+
+class GateDecision(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class PublicationReviewDecision(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REVISION = "revision"
+
+
+class PublisherStatus(StrEnum):
+    PENDING = "pending"
+    ASSIGNED = "assigned"
+    IN_PROGRESS = "in_progress"
+    PUBLISHED = "published"
 
 
 class TimestampMixin:
@@ -166,6 +188,9 @@ class Scenario(TimestampMixin, Base):
     publication: Mapped["Publication | None"] = relationship(
         back_populates="scenario", cascade="all, delete-orphan", uselist=False
     )
+    final_revision_gate: Mapped["FinalClientRevisionGate | None"] = relationship(
+        back_populates="scenario", cascade="all, delete-orphan", uselist=False
+    )
 
     @property
     def title(self) -> str:
@@ -263,6 +288,24 @@ class ScenarioComment(Base):
     author: Mapped[User] = relationship()
 
 
+class FinalClientRevisionGate(TimestampMixin, Base):
+    __tablename__ = "final_client_revision_gates"
+
+    scenario_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("scenarios.id", ondelete="CASCADE"), primary_key=True
+    )
+    decision: Mapped[GateDecision] = mapped_column(
+        Enum(GateDecision, name="gate_decision"), default=GateDecision.PENDING, index=True
+    )
+    request_comment: Mapped[str] = mapped_column(Text)
+    manager_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    decided_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    scenario: Mapped[Scenario] = relationship(back_populates="final_revision_gate")
+    decided_by: Mapped[User | None] = relationship()
+
+
 class MontageTask(TimestampMixin, Base):
     __tablename__ = "montage_tasks"
 
@@ -314,6 +357,31 @@ class Publication(TimestampMixin, Base):
     first_published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    assigned_publisher_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
+    manager_review_decision: Mapped[PublicationReviewDecision] = mapped_column(
+        Enum(PublicationReviewDecision, name="publication_review_decision"),
+        default=PublicationReviewDecision.PENDING,
+        index=True,
+    )
+    manager_review_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    manager_reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+    manager_reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    publisher_status: Mapped[PublisherStatus] = mapped_column(
+        Enum(PublisherStatus, name="publisher_status"),
+        default=PublisherStatus.PENDING,
+        index=True,
+    )
+    publisher_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    dzen_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    youtube_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tiktok_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     publisher_brief: Mapped[str | None] = mapped_column(Text, nullable=True)
     instagram_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     engagement_metrics: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -322,3 +390,13 @@ class Publication(TimestampMixin, Base):
     leia_script: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     scenario: Mapped[Scenario] = relationship(back_populates="publication")
+    assigned_publisher: Mapped[User | None] = relationship(
+        foreign_keys=[assigned_publisher_id]
+    )
+    manager_reviewed_by: Mapped[User | None] = relationship(
+        foreign_keys=[manager_reviewed_by_id]
+    )
+
+    @property
+    def assigned_publisher_name(self) -> str | None:
+        return self.assigned_publisher.full_name if self.assigned_publisher else None

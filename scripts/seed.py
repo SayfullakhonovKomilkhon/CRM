@@ -11,6 +11,7 @@ DEMO_USERS = [
     ("scenarist@crm.local", "Сценарист", Role.SCENARIST),
     ("editor@crm.local", "Монтажёр", Role.EDITOR),
     ("client@crm.local", "Клиент", Role.CLIENT),
+    ("publisher@crm.local", "Публицист", Role.PUBLISHER),
 ]
 
 

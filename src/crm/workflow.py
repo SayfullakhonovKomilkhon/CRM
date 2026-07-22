@@ -1,6 +1,14 @@
 from fastapi import HTTPException, status
 
-from crm.models import ApprovalDecision, ApprovalStage, Role, Scenario, ScenarioStatus
+from crm.models import (
+    ApprovalDecision,
+    ApprovalStage,
+    PublicationReviewDecision,
+    PublisherStatus,
+    Role,
+    Scenario,
+    ScenarioStatus,
+)
 
 EDITOR_VISIBLE_STATUSES = frozenset(
     {
@@ -11,15 +19,25 @@ EDITOR_VISIBLE_STATUSES = frozenset(
         ScenarioStatus.PUBLISHED,
     }
 )
+EDITOR_ACTION_STATUSES = frozenset(
+    {ScenarioStatus.HANDED_TO_EDITOR, ScenarioStatus.EDITING}
+)
+PUBLISHER_VISIBLE_STATUSES = frozenset(
+    {ScenarioStatus.READY_TO_PUBLISH, ScenarioStatus.PUBLISHED}
+)
 
 ROLE_APPROVAL_STAGES: dict[Role, set[ApprovalStage]] = {
-    Role.MANAGER: set(ApprovalStage),
-    Role.SCENARIST: set(ApprovalStage),
-    Role.EDITOR: set(ApprovalStage),
+    Role.MANAGER: {
+        ApprovalStage.SOURCE_MATERIAL,
+        ApprovalStage.MONTAGE_COMPLIANCE,
+    },
+    Role.SCENARIST: set(),
+    Role.EDITOR: set(),
     Role.CLIENT: {
         ApprovalStage.PRE_GENERATION_CLIENT,
         ApprovalStage.FINAL_CLIENT,
     },
+    Role.PUBLISHER: set(),
 }
 APPROVAL_STAGE_ORDER = tuple(ApprovalStage)
 
@@ -42,6 +60,14 @@ def _reset_approval(approval) -> None:
 def _unpublish(scenario: Scenario) -> None:
     if scenario.publication is not None:
         scenario.publication.is_published = False
+        scenario.publication.published_at = None
+        scenario.publication.manager_review_decision = PublicationReviewDecision.PENDING
+        scenario.publication.manager_review_comment = None
+        scenario.publication.manager_reviewed_by_id = None
+        scenario.publication.manager_reviewed_at = None
+        scenario.publication.assigned_publisher_id = None
+        scenario.publication.publisher_status = PublisherStatus.PENDING
+        scenario.publication.publisher_comment = None
 
 
 def reset_downstream_approvals(scenario: Scenario, stage: ApprovalStage) -> None:
@@ -76,26 +102,23 @@ def stage_prerequisites_met(scenario: Scenario, stage: ApprovalStage) -> bool:
     if stage == ApprovalStage.RESPONSIBLE_REVIEW:
         return bool(scenario.content and scenario.content.script_text)
     if stage == ApprovalStage.PRE_GENERATION_CLIENT:
-        return is_approved(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+        return bool(scenario.content and scenario.content.script_text)
     if stage == ApprovalStage.SOURCE_MATERIAL:
         return bool(
-            is_approved(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
-            and is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
+            is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
             and scenario.montage
             and scenario.montage.source_material_url
         )
     if stage == ApprovalStage.MONTAGE_COMPLIANCE:
         return bool(
-            is_approved(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
-            and is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
+            is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
             and is_approved(scenario, ApprovalStage.SOURCE_MATERIAL)
             and scenario.montage
             and scenario.montage.ready_material_url
         )
     if stage == ApprovalStage.FINAL_CLIENT:
         return bool(
-            is_approved(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
-            and is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
+            is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
             and is_approved(scenario, ApprovalStage.SOURCE_MATERIAL)
             and is_approved(scenario, ApprovalStage.MONTAGE_COMPLIANCE)
             and scenario.montage
@@ -109,12 +132,12 @@ def require_stage_prerequisites(scenario: Scenario, stage: ApprovalStage) -> Non
         return
     messages = {
         ApprovalStage.RESPONSIBLE_REVIEW: "Script text is required before responsible review",
-        ApprovalStage.PRE_GENERATION_CLIENT: "Responsible review must be approved first",
+        ApprovalStage.PRE_GENERATION_CLIENT: "Script text is required before client review",
         ApprovalStage.SOURCE_MATERIAL: (
-            "Responsible and client script approvals plus source material are required"
+            "Client script approval and source material are required"
         ),
         ApprovalStage.MONTAGE_COMPLIANCE: (
-            "The full script/source approval chain and ready material are required"
+            "The client/source approval chain and ready material are required"
         ),
         ApprovalStage.FINAL_CLIENT: (
             "The full script, source and montage approval chain is required"
@@ -185,7 +208,13 @@ def status_after_decision(
         (ApprovalStage.MONTAGE_COMPLIANCE, ApprovalDecision.REVISION): ScenarioStatus.EDITING,
         (ApprovalStage.MONTAGE_COMPLIANCE, ApprovalDecision.REJECTED): ScenarioStatus.EDITING,
         (ApprovalStage.FINAL_CLIENT, ApprovalDecision.APPROVED): ScenarioStatus.APPROVED,
-        (ApprovalStage.FINAL_CLIENT, ApprovalDecision.REVISION): ScenarioStatus.EDITING,
-        (ApprovalStage.FINAL_CLIENT, ApprovalDecision.REJECTED): ScenarioStatus.EDITING,
+        (
+            ApprovalStage.FINAL_CLIENT,
+            ApprovalDecision.REVISION,
+        ): ScenarioStatus.MANAGER_REVISION_REVIEW,
+        (
+            ApprovalStage.FINAL_CLIENT,
+            ApprovalDecision.REJECTED,
+        ): ScenarioStatus.MANAGER_REVISION_REVIEW,
     }
     return transitions[(stage, decision)]

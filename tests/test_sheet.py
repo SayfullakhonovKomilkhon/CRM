@@ -6,7 +6,15 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from crm.models import ApprovalDecision, ApprovalStage, Role
+from crm.models import (
+    ApprovalDecision,
+    ApprovalStage,
+    GateDecision,
+    PublicationReviewDecision,
+    PublisherStatus,
+    Role,
+    ScenarioStatus,
+)
 from crm.routers.scenarios import coerce_sheet_value, scenario_for_role
 from crm.schemas import (
     ApprovalUpdate,
@@ -21,14 +29,14 @@ from crm.sheet import columns_for_role, editable_fields_for_role, values_for_rol
 def test_internal_roles_receive_all_sheet_columns() -> None:
     columns_by_role = {
         role: [column.field for column in columns_for_role(role)]
-        for role in (Role.MANAGER, Role.SCENARIST, Role.EDITOR)
+        for role in (Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER)
     }
 
     assert all(columns == columns_by_role[Role.MANAGER] for columns in columns_by_role.values())
-    assert len(columns_by_role[Role.MANAGER]) == 78
+    assert len(columns_by_role[Role.MANAGER]) == 93
 
 
-def test_client_receives_only_the_safe_16_column_projection_in_order() -> None:
+def test_client_receives_only_the_safe_workflow_projection_in_order() -> None:
     assert [column.field for column in columns_for_role(Role.CLIENT)] == [
         "scenario_date",
         "external_id",
@@ -40,12 +48,20 @@ def test_client_receives_only_the_safe_16_column_projection_in_order() -> None:
         "montage.ready_material_url",
         "approval.final_client.decision",
         "approval.final_client.comment",
+        "final_revision_gate.decision",
+        "final_revision_gate.manager_comment",
         "publication.description_dzen",
         "publication.description_youtube",
         "publication.description_tiktok",
         "publication.description_instagram",
         "publication.publication_date",
         "publication.is_published",
+        "publication.publisher_status",
+        "publication.dzen_url",
+        "publication.youtube_url",
+        "publication.tiktok_url",
+        "publication.instagram_url",
+        "publication.published_at",
     ]
 
 
@@ -86,11 +102,26 @@ def test_editor_can_edit_all_visible_work_fields() -> None:
     assert "content.montage_brief" in editable
     assert "montage.client_brand_style" in editable
     assert "montage.price" in editable
-    assert "approval.source_material.decision" in editable
-    assert "approval.montage_compliance.comment" in editable
+    assert "approval.source_material.decision" not in editable
+    assert "approval.montage_compliance.comment" not in editable
     assert "external_id" not in editable
     assert "project.name" not in editable
     assert "scenarist.name" not in editable
+
+
+def test_editor_result_is_locked_outside_an_active_editor_stage() -> None:
+    scenario = SimpleNamespace(
+        status=ScenarioStatus.CLIENT_REVIEW,
+        available_sections=["content", "montage"],
+        available_approval_stages=[],
+    )
+
+    editable = set(editable_fields_for_role(scenario, Role.EDITOR))
+
+    assert "content.script_text" in editable
+    assert "montage.ready_material_url" not in editable
+    assert "montage.editor_status" not in editable
+    assert "montage.editor_comment" not in editable
 
 
 @pytest.mark.parametrize("status", list(EditorStatus))
@@ -151,10 +182,10 @@ def test_manager_and_scenarist_can_edit_all_visible_work_fields(role: Role) -> N
 
     assert "research.full_analysis" in editable
     assert "content.script_text" in editable
-    assert "approval.pre_generation_client.comment" in editable
-    assert "approval.final_client.decision" in editable
+    assert "approval.pre_generation_client.comment" not in editable
+    assert "approval.final_client.decision" not in editable
     assert "publication.description_instagram" in editable
-    assert "publication.is_published" in editable
+    assert "publication.is_published" not in editable
     assert "external_id" not in editable
     assert "project.name" not in editable
     assert "project.client_name" not in editable
@@ -173,10 +204,13 @@ def test_internal_roles_can_edit_all_available_work_fields(role: Role) -> None:
 
     assert "research.full_analysis" in editable
     assert "content.script_text" in editable
-    assert "montage.editor_comment" in editable
+    if role == Role.EDITOR:
+        assert "montage.editor_comment" in editable
+    else:
+        assert "montage.editor_comment" not in editable
     assert "publication.description_instagram" in editable
-    assert "approval.responsible_review.decision" in editable
-    assert "approval.final_client.comment" in editable
+    assert "approval.responsible_review.decision" not in editable
+    assert "approval.final_client.comment" not in editable
     assert "external_id" not in editable
     assert "project.name" not in editable
     assert "scenarist.name" not in editable
@@ -207,15 +241,15 @@ def test_client_edits_only_owned_approvals() -> None:
     assert "approval.responsible_review.comment" not in editable
 
 
-def test_all_internal_roles_can_reassign_scenarist_from_sheet() -> None:
+def test_only_manager_can_reassign_scenarist_from_sheet() -> None:
     scenario = SimpleNamespace(
         available_sections=["content", "approvals"],
         available_approval_stages=[],
     )
 
     assert "assigned_scenarist_id" in editable_fields_for_role(scenario, Role.MANAGER)
-    assert "assigned_scenarist_id" in editable_fields_for_role(scenario, Role.SCENARIST)
-    assert "assigned_scenarist_id" in editable_fields_for_role(scenario, Role.EDITOR)
+    assert "assigned_scenarist_id" not in editable_fields_for_role(scenario, Role.SCENARIST)
+    assert "assigned_scenarist_id" not in editable_fields_for_role(scenario, Role.EDITOR)
     assert "assigned_scenarist_id" not in editable_fields_for_role(scenario, Role.CLIENT)
 
 
@@ -291,7 +325,45 @@ def test_client_detail_projection_hides_assignment_ids_but_keeps_names() -> None
             scenarist_revision_comment=None,
             updated_at=now,
         ),
-        publication=None,
+        publication=SimpleNamespace(
+            scenario_id=scenario_id,
+            description_dzen=None,
+            description_youtube=None,
+            description_tiktok=None,
+            description_instagram=None,
+            publication_date=None,
+            is_published=False,
+            first_published_at=None,
+            assigned_publisher_id=uuid.uuid4(),
+            assigned_publisher_name="Публицист",
+            manager_review_decision=PublicationReviewDecision.PENDING,
+            manager_review_comment=None,
+            manager_reviewed_by_id=uuid.uuid4(),
+            manager_reviewed_at=None,
+            publisher_status=PublisherStatus.PENDING,
+            publisher_comment=None,
+            dzen_url=None,
+            youtube_url=None,
+            tiktok_url=None,
+            instagram_url=None,
+            published_at=None,
+            publisher_brief=None,
+            engagement_metrics=None,
+            publication_analysis=None,
+            ai_social_descriptions=None,
+            leia_script=None,
+            updated_at=now,
+        ),
+        final_revision_gate=SimpleNamespace(
+            scenario_id=scenario_id,
+            decision=GateDecision.PENDING,
+            request_comment="Доработать",
+            manager_comment=None,
+            decided_by_id=uuid.uuid4(),
+            decided_at=None,
+            created_at=now,
+            updated_at=now,
+        ),
         created_at=now,
         updated_at=now,
     )
@@ -304,6 +376,10 @@ def test_client_detail_projection_hides_assignment_ids_but_keeps_names() -> None
     assert result.scenarist.name == "Сценарист"
     assert result.montage.assigned_editor_id is None
     assert result.montage.assigned_editor_name == "Монтажёр"
+    assert result.publication.assigned_publisher_id is None
+    assert result.publication.assigned_publisher_name == "Публицист"
+    assert result.publication.manager_reviewed_by_id is None
+    assert result.final_revision_gate.decided_by_id is None
 
 
 @pytest.mark.parametrize(

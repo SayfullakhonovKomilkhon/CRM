@@ -43,17 +43,22 @@ def approval(stage: ApprovalStage, decision: ApprovalDecision = ApprovalDecision
     return SimpleNamespace(stage=stage, decision=decision)
 
 
-def test_internal_roles_can_decide_all_visible_workflow_stages() -> None:
+def test_workflow_decisions_are_role_safe() -> None:
     require_stage_role(Role.MANAGER, ApprovalStage.SOURCE_MATERIAL)
-    require_stage_role(Role.MANAGER, ApprovalStage.FINAL_CLIENT)
-    require_stage_role(Role.SCENARIST, ApprovalStage.PRE_GENERATION_CLIENT)
-    require_stage_role(Role.EDITOR, ApprovalStage.MONTAGE_COMPLIANCE)
+    require_stage_role(Role.MANAGER, ApprovalStage.MONTAGE_COMPLIANCE)
+    require_stage_role(Role.CLIENT, ApprovalStage.PRE_GENERATION_CLIENT)
     require_stage_role(Role.CLIENT, ApprovalStage.FINAL_CLIENT)
-    require_stage_role(Role.EDITOR, ApprovalStage.PRE_GENERATION_CLIENT)
 
-    with pytest.raises(HTTPException) as error:
-        require_stage_role(Role.CLIENT, ApprovalStage.SOURCE_MATERIAL)
-    assert error.value.status_code == 403
+    for role, stage in (
+        (Role.CLIENT, ApprovalStage.SOURCE_MATERIAL),
+        (Role.MANAGER, ApprovalStage.FINAL_CLIENT),
+        (Role.SCENARIST, ApprovalStage.PRE_GENERATION_CLIENT),
+        (Role.EDITOR, ApprovalStage.MONTAGE_COMPLIANCE),
+        (Role.PUBLISHER, ApprovalStage.FINAL_CLIENT),
+    ):
+        with pytest.raises(HTTPException) as error:
+            require_stage_role(role, stage)
+        assert error.value.status_code == 403
 
 
 def test_workflow_rejects_skipping_required_approvals() -> None:
@@ -94,6 +99,22 @@ def test_final_client_stage_requires_the_complete_approval_chain() -> None:
         ready_url="https://example.com/ready",
     )
 
+    assert stage_prerequisites_met(value, ApprovalStage.FINAL_CLIENT) is True
+
+
+def test_active_workflow_does_not_require_legacy_responsible_review() -> None:
+    value = scenario(
+        approvals=[
+            approval(ApprovalStage.PRE_GENERATION_CLIENT),
+            approval(ApprovalStage.SOURCE_MATERIAL),
+            approval(ApprovalStage.MONTAGE_COMPLIANCE),
+        ],
+        source_url="https://example.com/source",
+        ready_url="https://example.com/ready",
+    )
+
+    assert stage_prerequisites_met(value, ApprovalStage.SOURCE_MATERIAL) is True
+    assert stage_prerequisites_met(value, ApprovalStage.MONTAGE_COMPLIANCE) is True
     assert stage_prerequisites_met(value, ApprovalStage.FINAL_CLIENT) is True
 
 
@@ -182,6 +203,7 @@ def test_revision_resets_downstream_approvals_and_unpublishes() -> None:
     assert pre_generation.decided_by_id is None
     assert pre_generation.decided_at is None
     assert value.publication.is_published is False
+    assert value.publication.first_published_at == "timestamp"
 
 
 def test_script_change_resets_current_and_later_approvals() -> None:

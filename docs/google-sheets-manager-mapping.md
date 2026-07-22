@@ -54,3 +54,18 @@
 |---|---|
 | Одобрение клиента | approval `final_client` |
 | Комментарий клиента | comment approval `final_client` |
+
+## Финальная доработка и публикация
+
+| Google Sheets | Backend |
+|---|---|
+| Решение по запросу клиента | `final_client_revision_gates.decision` |
+| Ответ менеджера клиенту | `final_client_revision_gates.manager_comment` |
+| Выбор публициста | `publications.assigned_publisher_id` |
+| Проверка публикации | `publications.manager_review_decision` |
+| Комментарий к публикации | `publications.manager_review_comment` |
+
+Решение по клиентской доработке принимает только менеджер и обязательно сопровождает
+комментарием. Для одобрения публикации требуется выбрать активного пользователя роли
+`publisher`; только назначенный публицист затем может установить платформенные ссылки и статус
+`published`.

@@ -8,6 +8,7 @@ from crm.creation import (
     require_active_client,
     require_active_project,
     require_assignable_editor,
+    require_assignable_publisher,
     resolve_scenarist_assignment,
 )
 from crm.models import Role
@@ -100,4 +101,21 @@ def test_montage_assignment_requires_an_active_editor() -> None:
 
     with pytest.raises(HTTPException) as wrong_role:
         require_assignable_editor(actor(Role.SCENARIST))
+    assert wrong_role.value.status_code == 409
+
+
+def test_publication_assignment_requires_an_active_publisher() -> None:
+    publisher = actor(Role.PUBLISHER)
+    assert require_assignable_publisher(publisher) is publisher
+
+    with pytest.raises(HTTPException) as missing:
+        require_assignable_publisher(None)
+    assert missing.value.status_code == 404
+
+    with pytest.raises(HTTPException) as inactive:
+        require_assignable_publisher(actor(Role.PUBLISHER, active=False))
+    assert inactive.value.status_code == 409
+
+    with pytest.raises(HTTPException) as wrong_role:
+        require_assignable_publisher(actor(Role.EDITOR))
     assert wrong_role.value.status_code == 409

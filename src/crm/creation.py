@@ -60,6 +60,22 @@ def require_assignable_editor(user: User | None) -> User:
     return user
 
 
+def require_assignable_publisher(user: User | None) -> User:
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Publisher not found")
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Publisher is inactive",
+        )
+    if user.role != Role.PUBLISHER:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Assigned user is not a publisher",
+        )
+    return user
+
+
 def resolve_scenarist_assignment(
     actor: User,
     requested_id: uuid.UUID | None,

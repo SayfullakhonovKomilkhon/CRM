@@ -7,7 +7,15 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from crm.models import ApprovalDecision, ApprovalStage, Role, ScenarioStatus
+from crm.models import (
+    ApprovalDecision,
+    ApprovalStage,
+    GateDecision,
+    PublicationReviewDecision,
+    PublisherStatus,
+    Role,
+    ScenarioStatus,
+)
 
 
 class EditorStatus(StrEnum):
@@ -16,6 +24,21 @@ class EditorStatus(StrEnum):
     NOT_READY = "Не готово"
     REVIEW = "Проверить"
     FIXED = "Исправлено"
+
+
+class GateManagerDecision(StrEnum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class PublicationManagerDecision(StrEnum):
+    APPROVED = "approved"
+    REVISION = "revision"
+
+
+class PublisherActionStatus(StrEnum):
+    IN_PROGRESS = "in_progress"
+    PUBLISHED = "published"
 
 
 class ORMModel(BaseModel):
@@ -184,6 +207,22 @@ class ApprovalUpdate(WriteModel):
     note: str | None = Field(default=None, max_length=MAX_COMMENT_LENGTH)
 
 
+class FinalRevisionGateRead(ORMModel):
+    scenario_id: uuid.UUID
+    decision: GateDecision
+    request_comment: str
+    manager_comment: str | None
+    decided_by_id: uuid.UUID | None
+    decided_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class FinalRevisionGateUpdate(WriteModel):
+    decision: GateManagerDecision
+    comment: str = Field(min_length=1, max_length=MAX_COMMENT_LENGTH)
+
+
 class ProjectSummary(ORMModel):
     id: uuid.UUID
     name: str
@@ -279,18 +318,31 @@ class PublicationUpdate(WriteModel):
     description_youtube: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     description_tiktok: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     description_instagram: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
-    publication_date: date | None = None
-    is_published: bool | None = None
     publisher_brief: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
-    instagram_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
     engagement_metrics: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     publication_analysis: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     ai_social_descriptions: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     leia_script: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
 
-    _validate_instagram_url = field_validator("instagram_url", mode="before")(
-        normalize_http_url
-    )
+
+
+class PublicationManagerReviewUpdate(WriteModel):
+    decision: PublicationManagerDecision
+    comment: str | None = Field(default=None, max_length=MAX_COMMENT_LENGTH)
+    assigned_publisher_id: uuid.UUID | None = None
+
+
+class PublicationPublisherUpdate(WriteModel):
+    status: PublisherActionStatus
+    comment: str | None = Field(default=None, max_length=MAX_COMMENT_LENGTH)
+    dzen_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
+    youtube_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
+    tiktok_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
+    instagram_url: str | None = Field(default=None, max_length=MAX_URL_LENGTH)
+
+    _validate_urls = field_validator(
+        "dzen_url", "youtube_url", "tiktok_url", "instagram_url", mode="before"
+    )(normalize_http_url)
 
 
 class PublicationRead(ORMModel):
@@ -302,6 +354,18 @@ class PublicationRead(ORMModel):
     publication_date: date | None
     is_published: bool
     first_published_at: datetime | None
+    assigned_publisher_id: uuid.UUID | None
+    assigned_publisher_name: str | None
+    manager_review_decision: PublicationReviewDecision
+    manager_review_comment: str | None
+    manager_reviewed_by_id: uuid.UUID | None
+    manager_reviewed_at: datetime | None
+    publisher_status: PublisherStatus
+    publisher_comment: str | None
+    dzen_url: str | None
+    youtube_url: str | None
+    tiktok_url: str | None
+    published_at: datetime | None
     publisher_brief: str | None
     instagram_url: str | None
     engagement_metrics: str | None
@@ -334,6 +398,7 @@ class ScenarioRead(ORMModel):
     comments_count: int
     montage: MontageRead | None
     publication: PublicationRead | None
+    final_revision_gate: FinalRevisionGateRead | None = None
     available_sections: list[str] = Field(default_factory=list)
     available_approval_stages: list[ApprovalStage] = Field(default_factory=list)
     created_at: datetime
