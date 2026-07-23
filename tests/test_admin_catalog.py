@@ -1,0 +1,133 @@
+import uuid
+from types import SimpleNamespace
+
+import pytest
+from fastapi import HTTPException
+from pydantic import ValidationError
+
+from crm.models import Role
+from crm.routers.catalog import ensure_active_manager_remains, resolve_user_client_id
+from crm.schemas import ClientUpdate, ProjectUpdate, UserAdminCreate, UserAdminUpdate
+
+
+class FakeSession:
+    def __init__(self, value=None):
+        self.value = value
+
+    async def get(self, *_):
+        return self.value
+
+
+def user(role: Role, *, active: bool = True):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        role=role,
+        is_active=active,
+    )
+
+
+def test_admin_user_create_normalizes_email_and_validates_password() -> None:
+    payload = UserAdminCreate(
+        email="  MANAGER@Example.COM ",
+        full_name="Новый менеджер",
+        role=Role.MANAGER,
+        password="password8",
+    )
+
+    assert str(payload.email) == "MANAGER@example.com"
+
+    with pytest.raises(ValidationError):
+        UserAdminCreate(
+            email="invalid",
+            full_name="Пользователь",
+            role=Role.EDITOR,
+            password="password8",
+        )
+    with pytest.raises(ValidationError):
+        UserAdminCreate(
+            email="editor@example.com",
+            full_name="Пользователь",
+            role=Role.EDITOR,
+            password="short",
+        )
+
+
+@pytest.mark.parametrize("field", ["full_name", "role", "is_active", "password"])
+def test_admin_user_patch_rejects_explicit_null_for_required_values(field: str) -> None:
+    with pytest.raises(ValidationError):
+        UserAdminUpdate.model_validate({field: None})
+
+
+def test_catalog_patch_schemas_reject_null_required_values() -> None:
+    with pytest.raises(ValidationError):
+        ClientUpdate(name=None)
+    with pytest.raises(ValidationError):
+        ClientUpdate(is_active=None)
+    with pytest.raises(ValidationError):
+        ProjectUpdate(name=None)
+    with pytest.raises(ValidationError):
+        ProjectUpdate(is_active=None)
+
+    assert ClientUpdate(external_id=None).external_id is None
+    assert ProjectUpdate(external_name=None).external_name is None
+
+
+@pytest.mark.asyncio
+async def test_client_role_requires_an_active_client() -> None:
+    client_id = uuid.uuid4()
+    active_client = SimpleNamespace(id=client_id, is_active=True)
+
+    assert (
+        await resolve_user_client_id(FakeSession(active_client), Role.CLIENT, client_id)
+        == client_id
+    )
+
+    with pytest.raises(HTTPException) as missing_id:
+        await resolve_user_client_id(FakeSession(), Role.CLIENT, None)
+    assert missing_id.value.status_code == 422
+
+    with pytest.raises(HTTPException) as missing_client:
+        await resolve_user_client_id(FakeSession(), Role.CLIENT, client_id)
+    assert missing_client.value.status_code == 404
+
+    with pytest.raises(HTTPException) as inactive_client:
+        await resolve_user_client_id(
+            FakeSession(SimpleNamespace(id=client_id, is_active=False)),
+            Role.CLIENT,
+            client_id,
+        )
+    assert inactive_client.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_internal_role_cannot_have_client_id() -> None:
+    with pytest.raises(HTTPException) as error:
+        await resolve_user_client_id(FakeSession(), Role.EDITOR, uuid.uuid4())
+    assert error.value.status_code == 422
+
+    assert await resolve_user_client_id(FakeSession(), Role.EDITOR, None) is None
+
+
+def test_last_active_manager_cannot_be_deactivated_or_demoted() -> None:
+    manager = user(Role.MANAGER)
+
+    for role, active in (
+        (Role.MANAGER, False),
+        (Role.SCENARIST, True),
+    ):
+        with pytest.raises(HTTPException) as error:
+            ensure_active_manager_remains(manager, role, active, active_manager_count=1)
+        assert error.value.status_code == 409
+
+    ensure_active_manager_remains(
+        manager,
+        Role.MANAGER,
+        False,
+        active_manager_count=2,
+    )
+    ensure_active_manager_remains(
+        user(Role.EDITOR),
+        Role.EDITOR,
+        False,
+        active_manager_count=1,
+    )

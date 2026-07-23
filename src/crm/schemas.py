@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from crm.models import (
     ApprovalDecision,
@@ -89,6 +89,43 @@ class UserOptionRead(ORMModel):
     full_name: str
 
 
+class UserAdminRead(ORMModel):
+    id: uuid.UUID
+    email: str
+    full_name: str
+    role: Role
+    client_id: uuid.UUID | None
+    is_active: bool
+    created_at: datetime
+
+
+class UserAdminCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    email: EmailStr
+    full_name: str = Field(min_length=1, max_length=255)
+    role: Role
+    client_id: uuid.UUID | None = None
+    password: str = Field(min_length=8, max_length=1024)
+
+
+class UserAdminUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    full_name: str | None = Field(default=None, min_length=1, max_length=255)
+    role: Role | None = None
+    client_id: uuid.UUID | None = None
+    is_active: bool | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=1024)
+
+    @model_validator(mode="after")
+    def reject_null_required_values(self):
+        for field_name in ("full_name", "role", "is_active", "password"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
+
+
 class ClientCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -101,6 +138,21 @@ class ClientRead(ORMModel):
     name: str
     external_id: str | None
     is_active: bool
+
+
+class ClientUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    external_id: str | None = Field(default=None, max_length=100)
+    is_active: bool | None = None
+
+    @model_validator(mode="after")
+    def reject_null_required_values(self):
+        for field_name in ("name", "is_active"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
 
 
 class ProjectCreate(BaseModel):
@@ -117,6 +169,21 @@ class ProjectRead(ORMModel):
     name: str
     external_name: str | None
     is_active: bool
+
+
+class ProjectUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    external_name: str | None = Field(default=None, max_length=255)
+    is_active: bool | None = None
+
+    @model_validator(mode="after")
+    def reject_null_required_values(self):
+        for field_name in ("name", "is_active"):
+            if field_name in self.model_fields_set and getattr(self, field_name) is None:
+                raise ValueError(f"{field_name} cannot be null")
+        return self
 
 
 class ResearchPayload(WriteModel):

@@ -12,10 +12,16 @@ from crm.models import Client, Project, Role, User
 from crm.schemas import (
     ClientCreate,
     ClientRead,
+    ClientUpdate,
     ProjectCreate,
     ProjectRead,
+    ProjectUpdate,
+    UserAdminCreate,
+    UserAdminRead,
+    UserAdminUpdate,
     UserOptionRead,
 )
+from crm.security import hash_password
 
 router = APIRouter(tags=["catalog"])
 
@@ -58,6 +64,50 @@ async def create_client(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Client already exists",
+        ) from error
+    await session.refresh(client)
+    return client
+
+
+@router.patch("/clients/{client_id}", response_model=ClientRead)
+async def update_client(
+    client_id: uuid.UUID,
+    payload: ClientUpdate,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> Client:
+    client = await session.get(Client, client_id)
+    if client is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Client not found")
+
+    changes = payload.model_dump(exclude_unset=True)
+    duplicate_conditions = []
+    if "name" in changes:
+        duplicate_conditions.append(func.lower(Client.name) == changes["name"].lower())
+    if changes.get("external_id"):
+        duplicate_conditions.append(Client.external_id == changes["external_id"])
+    if duplicate_conditions:
+        duplicate = await session.scalar(
+            select(Client.id).where(
+                Client.id != client.id,
+                or_(*duplicate_conditions),
+            )
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Client with this name or external_id already exists",
+            )
+
+    for key, value in changes.items():
+        setattr(client, key, value)
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Client with this name or external_id already exists",
         ) from error
     await session.refresh(client)
     return client
@@ -113,6 +163,197 @@ async def create_project(
         ) from error
     await session.refresh(project)
     return project
+
+
+@router.patch("/projects/{project_id}", response_model=ProjectRead)
+async def update_project(
+    project_id: uuid.UUID,
+    payload: ProjectUpdate,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> Project:
+    project = await session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    changes = payload.model_dump(exclude_unset=True)
+    if "name" in changes:
+        duplicate = await session.scalar(
+            select(Project.id).where(
+                Project.id != project.id,
+                Project.client_id == project.client_id,
+                func.lower(Project.name) == changes["name"].lower(),
+            )
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Project with this name already exists for the client",
+            )
+
+    for key, value in changes.items():
+        setattr(project, key, value)
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Project with this name already exists for the client",
+        ) from error
+    await session.refresh(project)
+    return project
+
+
+async def resolve_user_client_id(
+    session: AsyncSession,
+    role: Role,
+    client_id: uuid.UUID | None,
+) -> uuid.UUID | None:
+    if role == Role.CLIENT:
+        if client_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="client_id is required for the client role",
+            )
+        return require_active_client(await session.get(Client, client_id)).id
+    if client_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="client_id must be null for internal roles",
+        )
+    return None
+
+
+def ensure_active_manager_remains(
+    target: User,
+    next_role: Role,
+    next_is_active: bool,
+    active_manager_count: int,
+) -> None:
+    removes_active_manager = (
+        target.role == Role.MANAGER
+        and target.is_active
+        and (next_role != Role.MANAGER or not next_is_active)
+    )
+    if removes_active_manager and active_manager_count <= 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The last active manager cannot be deactivated or demoted",
+        )
+
+
+@router.get("/users", response_model=list[UserAdminRead])
+async def list_users(
+    role: Role | None = None,
+    active_only: bool = True,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> list[User]:
+    query = select(User).order_by(User.full_name, User.email)
+    if role is not None:
+        query = query.where(User.role == role)
+    if active_only:
+        query = query.where(User.is_active.is_(True))
+    return list((await session.scalars(query)).all())
+
+
+@router.post("/users", response_model=UserAdminRead, status_code=status.HTTP_201_CREATED)
+async def create_user(
+    payload: UserAdminCreate,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> User:
+    email = str(payload.email).lower()
+    duplicate = await session.scalar(
+        select(User.id).where(func.lower(User.email) == email)
+    )
+    if duplicate is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User with this email already exists",
+        )
+    client_id = await resolve_user_client_id(session, payload.role, payload.client_id)
+    user = User(
+        email=email,
+        full_name=payload.full_name,
+        role=payload.role,
+        client_id=client_id,
+        password_hash=hash_password(payload.password),
+    )
+    session.add(user)
+    try:
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User with this email already exists",
+        ) from error
+    await session.refresh(user)
+    return user
+
+
+@router.patch("/users/{user_id}", response_model=UserAdminRead)
+async def update_user(
+    user_id: uuid.UUID,
+    payload: UserAdminUpdate,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> User:
+    active_managers = list(
+        (
+            await session.scalars(
+                select(User)
+                .where(User.role == Role.MANAGER, User.is_active.is_(True))
+                .order_by(User.id)
+                .with_for_update()
+            )
+        ).all()
+    )
+    target = await session.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    next_role = payload.role if "role" in payload.model_fields_set else target.role
+    next_is_active = (
+        payload.is_active
+        if "is_active" in payload.model_fields_set
+        else target.is_active
+    )
+    ensure_active_manager_remains(
+        target,
+        next_role,
+        next_is_active,
+        len(active_managers),
+    )
+
+    client_id_was_set = "client_id" in payload.model_fields_set
+    if next_role != Role.CLIENT and "role" in payload.model_fields_set:
+        if client_id_was_set and payload.client_id is not None:
+            await resolve_user_client_id(session, next_role, payload.client_id)
+        next_client_id = None
+    else:
+        next_client_id = payload.client_id if client_id_was_set else target.client_id
+        next_client_id = await resolve_user_client_id(
+            session,
+            next_role,
+            next_client_id,
+        )
+
+    changes = payload.model_dump(
+        exclude_unset=True,
+        exclude={"client_id", "password"},
+    )
+    for key, value in changes.items():
+        setattr(target, key, value)
+    target.client_id = next_client_id
+    if "password" in payload.model_fields_set:
+        target.password_hash = hash_password(payload.password)
+
+    await session.commit()
+    await session.refresh(target)
+    return target
 
 
 @router.get("/users/scenarists", response_model=list[UserOptionRead])

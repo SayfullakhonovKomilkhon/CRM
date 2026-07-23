@@ -31,7 +31,11 @@ The frontend base URL is `http://localhost:8000/api/v1`.
 - `POST /api/v1/auth/login`
 - `GET /api/v1/auth/me`
 - `GET|POST /api/v1/clients`
+- `PATCH /api/v1/clients/{id}`
 - `GET|POST /api/v1/projects`
+- `PATCH /api/v1/projects/{id}`
+- `GET|POST /api/v1/users`
+- `PATCH /api/v1/users/{id}`
 - `GET /api/v1/users/scenarists`
 - `GET /api/v1/users/editors`
 - `GET /api/v1/users/publishers`
@@ -86,6 +90,22 @@ Creation errors use stable semantics: `403` for a forbidden creation role or att
 cross-user assignment during scenarist-created rows, `404` for a missing referenced entity,
 and `409` for an inactive entity, wrong assignment role, or duplicate business identifier.
 `POST /scenarios` never accepts a caller-provided scenario `external_id`.
+
+## Manager catalogs
+
+Only managers can create and update users, clients, and projects. `GET /users` supports
+`role` and `active_only` filters; `GET /clients` and `GET /projects` support
+`active_only=false` for archive screens.
+
+User creation accepts `email`, `full_name`, `role`, optional `client_id`, and a password of at
+least eight characters. A `client` user must reference an active client. Internal roles must
+have `client_id=null`. `PATCH /users/{id}` can update the name, role, client assignment, active
+state, or password. The backend transactionally prevents deactivating or demoting the last
+active manager account.
+
+Client updates accept `name`, `external_id`, and `is_active`. Project updates accept `name`,
+`external_name`, and `is_active`. Duplicate names and identifiers return `409`; missing rows
+return `404`.
 
 Google Sheets import will be a separate read-only adapter. It is intentionally not connected to the production server in this first local slice.
 
