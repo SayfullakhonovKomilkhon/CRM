@@ -11,6 +11,8 @@ from crm.models import (
     ApprovalDecision,
     ApprovalStage,
     GateDecision,
+    GoogleSheetsSyncMode,
+    GoogleSheetsSyncStatus,
     PublicationReviewDecision,
     PublisherStatus,
     Role,
@@ -126,6 +128,103 @@ class UserAdminUpdate(BaseModel):
         return self
 
 
+class GoogleSheetsRowAction(StrEnum):
+    CREATED = "created"
+    UPDATED = "updated"
+    SKIPPED = "skipped"
+    ERROR = "error"
+
+
+class GoogleSheetsTabStatus(BaseModel):
+    tab: str
+    header_row: int
+    project_id: uuid.UUID
+    assigned_scenarist_id: uuid.UUID | None
+
+
+class GoogleSheetsSyncRunRead(ORMModel):
+    id: uuid.UUID
+    mode: GoogleSheetsSyncMode
+    status: GoogleSheetsSyncStatus
+    source_tab: str
+    header_row: int
+    project_id: uuid.UUID
+    preview_id: uuid.UUID | None
+    total_rows: int
+    created_count: int
+    updated_count: int
+    skipped_count: int
+    error_count: int
+    warnings: list[str]
+    finished_at: datetime | None
+    created_at: datetime
+
+
+class GoogleSheetsStatusRead(BaseModel):
+    enabled: bool
+    ready: bool
+    credential_configured: bool
+    spreadsheet_configured: bool
+    configured_tabs: list[GoogleSheetsTabStatus]
+    safe_import_fields: list[str]
+    missing_requirements: list[str]
+    last_run: GoogleSheetsSyncRunRead | None
+
+
+class GoogleSheetsPreviewRequest(WriteModel):
+    tab: str = Field(min_length=1, max_length=255)
+
+
+class GoogleSheetsSyncRequest(WriteModel):
+    tab: str = Field(min_length=1, max_length=255)
+    preview_id: uuid.UUID
+    confirm: Literal[True]
+
+
+class GoogleSheetsRowResult(BaseModel):
+    row_number: int
+    action: GoogleSheetsRowAction
+    checksum: str | None = None
+    scenario_id: uuid.UUID | None = None
+    external_id: str | None = None
+    title: str | None = None
+    errors: list[str] = Field(default_factory=list)
+
+
+class GoogleSheetsRunSummary(BaseModel):
+    total_rows: int
+    created: int
+    updated: int
+    skipped: int
+    errors: int
+
+
+class GoogleSheetsPreviewRead(BaseModel):
+    preview_id: uuid.UUID
+    status: GoogleSheetsSyncStatus
+    source_tab: str
+    header_row: int
+    project_id: uuid.UUID
+    snapshot_checksum: str
+    expires_at: datetime
+    summary: GoogleSheetsRunSummary
+    rows: list[GoogleSheetsRowResult]
+    warnings: list[str]
+
+
+class GoogleSheetsSyncRead(BaseModel):
+    run_id: uuid.UUID
+    preview_id: uuid.UUID
+    status: GoogleSheetsSyncStatus
+    source_tab: str
+    project_id: uuid.UUID
+    snapshot_checksum: str
+    written: bool
+    summary: GoogleSheetsRunSummary
+    rows: list[GoogleSheetsRowResult]
+    warnings: list[str]
+
+
 class ClientCreate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -223,9 +322,6 @@ class ScenarioCreate(WriteModel):
 
     project_id: uuid.UUID
     assigned_scenarist_id: uuid.UUID | None = None
-    source_sheet_id: str | None = Field(default=None, max_length=255)
-    source_tab: str | None = Field(default=None, max_length=255)
-    source_row: int | None = Field(default=None, ge=1)
     scenario_date: date | None = None
     deadline: date | None = None
     score: int | None = Field(default=None, ge=0, le=100)

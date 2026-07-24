@@ -49,6 +49,9 @@ The frontend base URL is `http://localhost:8000/api/v1`.
 - `GET|PUT /api/v1/scenarios/{id}/final-revision-gate`
 - `PUT /api/v1/scenarios/{id}/publication/manager-review`
 - `PUT /api/v1/scenarios/{id}/publication/publisher`
+- `GET /api/v1/google-sheets/status`
+- `POST /api/v1/google-sheets/preview`
+- `POST /api/v1/google-sheets/sync`
 
 `GET /scenarios` returns lightweight list items with frontend-ready `title`, `project`,
 `scenarist`, `deadline`, `score`, and `comments_count`. Heavy `research`, `content`, `approvals`,
@@ -107,7 +110,19 @@ Client updates accept `name`, `external_id`, and `is_active`. Project updates ac
 `external_name`, and `is_active`. Duplicate names and identifiers return `409`; missing rows
 return `404`.
 
-Google Sheets import will be a separate read-only adapter. It is intentionally not connected to the production server in this first local slice.
+Google Sheets is connected through a manager-only, one-way adapter. It reads with a
+read-only service account, validates rows in preview, and writes only after an explicit
+confirmed sync using the unchanged preview. Imported source metadata is server-owned;
+public scenario creation cannot set it.
+
+The safe v1 import scope is scenario main data, research, and scenario content only.
+It never imports users, `external_id`, approvals, montage, publication, assignments outside
+the configured scenarist, or workflow status. Rows are idempotent by spreadsheet, tab, and
+source row. Once any workflow record exists, further source updates for that row are rejected
+instead of overwriting CRM work. Source deletions never delete CRM rows.
+
+Configuration, exact payloads, mapping, and Railway secret setup are documented in
+[`docs/google-sheets-import.md`](docs/google-sheets-import.md).
 
 The approved source mapping is documented in
 [`docs/google-sheets-scenarist-mapping.md`](docs/google-sheets-scenarist-mapping.md).
@@ -131,6 +146,7 @@ migrations before each deployment, checks `/health`, and the container listens o
    CORS_ORIGINS=https://your-frontend-domain.example
    ACCESS_TOKEN_EXPIRE_MINUTES=480
    SEED_DEMO_DATA=true
+   GOOGLE_SHEETS_ENABLED=false
    ```
 
    `SEED_DEMO_DATA=true` creates the five documented demo accounts for temporary testing.
@@ -143,3 +159,5 @@ migrations before each deployment, checks `/health`, and the container listens o
 
 Do not paste a database password or `APP_SECRET_KEY` into GitHub. Railway variables and the
 Postgres reference variable keep secrets outside the repository.
+The Google service-account JSON is also a Railway secret and must never be committed or sent
+to the frontend.

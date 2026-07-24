@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from crm.config import settings
-from crm.routers import auth, catalog, scenarios
+from crm.routers import auth, catalog, google_sheets, scenarios
 
 app = FastAPI(
     title=settings.app_name,
@@ -27,3 +27,4 @@ async def health() -> dict[str, str]:
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(catalog.router, prefix="/api/v1")
 app.include_router(scenarios.router, prefix="/api/v1")
+app.include_router(google_sheets.router, prefix="/api/v1")

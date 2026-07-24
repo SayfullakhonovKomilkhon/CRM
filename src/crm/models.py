@@ -4,6 +4,7 @@ from decimal import Decimal
 from enum import StrEnum
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Date,
     DateTime,
@@ -79,6 +80,18 @@ class PublisherStatus(StrEnum):
     PUBLISHED = "published"
 
 
+class GoogleSheetsSyncMode(StrEnum):
+    PREVIEW = "preview"
+    SYNC = "sync"
+
+
+class GoogleSheetsSyncStatus(StrEnum):
+    PREVIEW_READY = "preview_ready"
+    COMPLETED = "completed"
+    VALIDATION_FAILED = "validation_failed"
+    FAILED = "failed"
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -140,6 +153,12 @@ class Scenario(TimestampMixin, Base):
     __tablename__ = "scenarios"
     __table_args__ = (
         UniqueConstraint("source_sheet_id", "source_tab", "external_id", name="uq_scenario_source"),
+        UniqueConstraint(
+            "source_sheet_id",
+            "source_tab",
+            "source_row",
+            name="uq_scenario_source_row",
+        ),
         UniqueConstraint("external_id", name="uq_scenarios_external_id"),
     )
 
@@ -154,6 +173,7 @@ class Scenario(TimestampMixin, Base):
     source_sheet_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_tab: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     scenario_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     deadline: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -207,6 +227,38 @@ class Scenario(TimestampMixin, Base):
     @property
     def comments_count(self) -> int:
         return len(self.comments)
+
+
+class GoogleSheetsSyncRun(TimestampMixin, Base):
+    __tablename__ = "google_sheets_sync_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    spreadsheet_id: Mapped[str] = mapped_column(String(255), index=True)
+    source_tab: Mapped[str] = mapped_column(String(255), index=True)
+    header_row: Mapped[int] = mapped_column(Integer)
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), index=True)
+    requested_by_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    preview_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("google_sheets_sync_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    mode: Mapped[GoogleSheetsSyncMode] = mapped_column(
+        Enum(GoogleSheetsSyncMode, name="google_sheets_sync_mode"),
+        index=True,
+    )
+    status: Mapped[GoogleSheetsSyncStatus] = mapped_column(
+        Enum(GoogleSheetsSyncStatus, name="google_sheets_sync_status"),
+        index=True,
+    )
+    snapshot_checksum: Mapped[str] = mapped_column(String(64))
+    total_rows: Mapped[int] = mapped_column(Integer, default=0)
+    created_count: Mapped[int] = mapped_column(Integer, default=0)
+    updated_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    row_report: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ScenarioResearch(TimestampMixin, Base):
