@@ -378,6 +378,11 @@ def apply_visibility(query, user: User):
     return query
 
 
+def client_filter(client_id: uuid.UUID):
+    """Filter by owning client without changing the caller's role visibility."""
+    return Project.client_id == client_id
+
+
 QUEUE_ROLES = {
     ScenarioQueue.SCENARIO_MANAGER_REVIEW: Role.MANAGER,
     ScenarioQueue.EDITOR_MANAGER_INTAKE: Role.EDITOR_MANAGER,
@@ -578,6 +583,7 @@ def scenario_for_role(scenario: Scenario, user: User) -> ScenarioRead:
 async def list_scenarios(
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    client_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
     scenario_statuses: list[ScenarioStatus] | None = Query(None, alias="status"),
     assigned_scenarist_id: uuid.UUID | None = None,
@@ -605,6 +611,8 @@ async def list_scenarios(
     filters = []
     if queue is not None:
         filters.append(queue_filter(queue, user))
+    if client_id:
+        filters.append(client_filter(client_id))
     if project_id:
         filters.append(Scenario.project_id == project_id)
     if scenario_statuses:
@@ -717,6 +725,7 @@ async def list_scenarios(
 async def list_scenario_sheet(
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    client_id: uuid.UUID | None = None,
     project_id: uuid.UUID | None = None,
     scenario_statuses: list[ScenarioStatus] | None = Query(None, alias="status"),
     assigned_scenarist_id: uuid.UUID | None = None,
@@ -739,6 +748,8 @@ async def list_scenario_sheet(
     filters = []
     if queue is not None:
         filters.append(queue_filter(queue, user))
+    if client_id:
+        filters.append(client_filter(client_id))
     if project_id:
         filters.append(Scenario.project_id == project_id)
     if scenario_statuses:
