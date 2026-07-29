@@ -266,7 +266,17 @@ def parse_date(value: Any) -> date | None:
             return datetime.strptime(normalized, date_format).date()
         except ValueError:
             continue
-    raise ValueError("expected date as YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY or MM/DD/YYYY")
+    for date_format in ("%d.%m", "%d/%m"):
+        try:
+            return datetime.strptime(normalized, date_format).date().replace(
+                year=date.today().year
+            )
+        except ValueError:
+            continue
+    raise ValueError(
+        "expected date as YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY, MM/DD/YYYY, "
+        "DD.MM or DD/MM"
+    )
 
 
 def parse_integer(value: Any) -> int | None:

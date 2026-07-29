@@ -10,6 +10,7 @@ from crm.google_sheets import (
     GoogleSheetsConfigurationError,
     GoogleSheetsSourceError,
     canonical_checksum,
+    parse_date,
     parse_sheet_values,
     resolve_columns,
     workflow_is_locked,
@@ -51,6 +52,11 @@ def test_settings_reject_duplicate_tabs_case_insensitively():
                 {"tab": "content", "project_id": project_id},
             ],
         )
+
+
+def test_parse_date_accepts_day_and_month_using_current_year():
+    assert parse_date("25.05") == date(date.today().year, 5, 25)
+    assert parse_date("27/05") == date(date.today().year, 5, 27)
 
 
 def test_resolve_columns_supports_explicit_header_and_rejects_unsafe_fields():
