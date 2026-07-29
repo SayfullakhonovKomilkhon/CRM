@@ -129,16 +129,28 @@ Client updates accept `name`, `external_id`, and `is_active`. Project updates ac
 `external_name`, and `is_active`. Duplicate names and identifiers return `409`; missing rows
 return `404`.
 
-Google Sheets is connected through a manager-only, one-way adapter. It reads with a
-read-only service account, validates rows in preview, and writes only after an explicit
-confirmed sync using the unchanged preview. Imported source metadata is server-owned;
-public scenario creation cannot set it.
+Google Sheets has two complementary paths. The existing manager-only preview/confirmed
+sync remains the reconciliation tool. The bidirectional foundation registers each
+spreadsheet/tab in `SheetSource`, accepts timestamped HMAC webhooks, stores idempotent
+inbound events, processes Redis notifications with PostgreSQL fallback, and records CRM
+changes in a transactional writeback outbox.
 
-The safe v1 import scope is scenario main data, research, and scenario content only.
+The safe v1 inbound scope is scenario main data, research, and scenario content only.
 It never imports users, `external_id`, approvals, montage, publication, assignments outside
-the configured scenarist, or workflow status. Rows are idempotent by spreadsheet, tab, and
-source row. Once any workflow record exists, further source updates for that row are rejected
-instead of overwriting CRM work. Source deletions never delete CRM rows.
+the configured scenarist, or workflow status. Rows use a protected stable `crm_row_id` UUID,
+independent of row number. Approved and production work remains locked; a new Sheets version
+is accepted only during an active scenarist revision returned by responsible/client review,
+and dependent approvals are reset through normal workflow rules. Source deletions never
+delete CRM rows.
+
+Outbound writes can touch only fields configured in a source's `writeback_column_map`.
+The identity UUID is written through a separate `crm_row_id_column`. Service-account
+credentials use Google Sheets read/write scope and remain server-side only.
+
+The Apps Script template is in
+[`integrations/google_apps_script`](integrations/google_apps_script). It supports an installed
+edit trigger, exact-tab filtering, paste/clear/multi-row edits, one signed event per row,
+stable row UUID assignment, and CRM-origin suppression.
 
 Configuration, exact payloads, mapping, and Railway secret setup are documented in
 [`docs/google-sheets-import.md`](docs/google-sheets-import.md).

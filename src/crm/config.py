@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     )
     google_sheets_preview_ttl_minutes: int = 30
     google_sheets_max_rows: int = 1_000
+    redis_url: str | None = None
+    sheet_webhook_max_age_seconds: int = 300
+    sheet_google_max_retries: int = 4
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -116,6 +119,10 @@ class Settings(BaseSettings):
             raise ValueError("GOOGLE_SHEETS_PREVIEW_TTL_MINUTES must be positive")
         if not 1 <= self.google_sheets_max_rows <= 10_000:
             raise ValueError("GOOGLE_SHEETS_MAX_ROWS must be between 1 and 10000")
+        if not 30 <= self.sheet_webhook_max_age_seconds <= 3600:
+            raise ValueError("SHEET_WEBHOOK_MAX_AGE_SECONDS must be between 30 and 3600")
+        if not 1 <= self.sheet_google_max_retries <= 10:
+            raise ValueError("SHEET_GOOGLE_MAX_RETRIES must be between 1 and 10")
         tabs = [item.tab.casefold() for item in self.google_sheets_tab_configs]
         if len(tabs) != len(set(tabs)):
             raise ValueError("GOOGLE_SHEETS_TAB_CONFIGS contains duplicate tab names")

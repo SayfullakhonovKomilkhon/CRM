@@ -28,7 +28,7 @@ from crm.schemas import (
     ScenarioCreate,
 )
 
-SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
 SAFE_IMPORT_FIELDS = (
     "scenario_date",
@@ -633,7 +633,7 @@ class GoogleSheetsClient:
         try:
             self._credentials = Credentials.from_service_account_info(
                 info,
-                scopes=[SHEETS_READONLY_SCOPE],
+                scopes=[SHEETS_SCOPE],
             )
         except (TypeError, ValueError, KeyError) as error:
             raise GoogleSheetsConfigurationError(
@@ -699,6 +699,60 @@ class GoogleSheetsClient:
         if not isinstance(values, list):
             raise GoogleSheetsSourceError("Google Sheets API returned invalid values")
         return values
+
+    async def batch_update_values(
+        self,
+        spreadsheet_id: str,
+        updates: list[dict[str, Any]],
+        *,
+        max_retries: int = 4,
+    ) -> None:
+        """Write explicitly prepared A1 ranges; callers enforce the column allowlist."""
+        if not updates:
+            return
+        token = await self._access_token()
+        url = (
+            "https://sheets.googleapis.com/v4/spreadsheets/"
+            f"{quote(spreadsheet_id, safe='')}/values:batchUpdate"
+        )
+        payload = {
+            "valueInputOption": "RAW",
+            "includeValuesInResponse": False,
+            "data": updates,
+        }
+        async with httpx.AsyncClient(timeout=30) as client:
+            for attempt in range(max_retries):
+                try:
+                    response = await client.post(
+                        url,
+                        headers={"Authorization": f"Bearer {token}"},
+                        json=payload,
+                    )
+                except httpx.HTTPError as error:
+                    if attempt + 1 >= max_retries:
+                        raise GoogleSheetsSourceError(
+                            "Google Sheets write request failed"
+                        ) from error
+                    await asyncio.sleep(2**attempt)
+                    continue
+                if response.status_code == 429 or response.status_code >= 500:
+                    if attempt + 1 >= max_retries:
+                        raise GoogleSheetsSourceError(
+                            f"Google Sheets API returned HTTP {response.status_code}"
+                        )
+                    retry_after = response.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after else 2**attempt
+                    await asyncio.sleep(min(delay, 30))
+                    continue
+                if response.status_code in {401, 403}:
+                    raise GoogleSheetsSourceError(
+                        "Service account cannot write to the configured spreadsheet"
+                    )
+                if response.status_code >= 400:
+                    raise GoogleSheetsSourceError(
+                        f"Google Sheets API returned HTTP {response.status_code}"
+                    )
+                return
 
 
 _google_sheets_clients: dict[str, GoogleSheetsClient] = {}

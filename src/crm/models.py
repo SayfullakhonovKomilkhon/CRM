@@ -94,6 +94,21 @@ class GoogleSheetsSyncStatus(StrEnum):
     FAILED = "failed"
 
 
+class SheetEventStatus(StrEnum):
+    RECEIVED = "received"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+class SheetWritebackStatus(StrEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -162,6 +177,11 @@ class Scenario(TimestampMixin, Base):
             name="uq_scenario_source_row",
         ),
         UniqueConstraint("external_id", name="uq_scenarios_external_id"),
+        UniqueConstraint(
+            "sheet_source_id",
+            "crm_row_id",
+            name="uq_scenario_sheet_source_crm_row",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -176,6 +196,10 @@ class Scenario(TimestampMixin, Base):
     source_tab: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    sheet_source_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("sheet_sources.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    crm_row_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True, default=uuid.uuid4)
     scenario_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     deadline: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -261,6 +285,92 @@ class GoogleSheetsSyncRun(TimestampMixin, Base):
     row_report: Mapped[list[dict]] = mapped_column(JSON, default=list)
     warnings: Mapped[list[str]] = mapped_column(JSON, default=list)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SheetSource(TimestampMixin, Base):
+    __tablename__ = "sheet_sources"
+    __table_args__ = (
+        UniqueConstraint("spreadsheet_id", "source_tab", name="uq_sheet_source_location"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    spreadsheet_id: Mapped[str] = mapped_column(String(255), index=True)
+    source_tab: Mapped[str] = mapped_column(String(255))
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), index=True)
+    assigned_scenarist_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    header_row: Mapped[int] = mapped_column(Integer, default=1)
+    inbound_column_map: Mapped[dict] = mapped_column(JSON, default=dict)
+    writeback_column_map: Mapped[dict] = mapped_column(JSON, default=dict)
+    crm_row_id_column: Mapped[str] = mapped_column(String(3), default="A")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    webhook_secret_version: Mapped[int] = mapped_column(Integer, default=1)
+    last_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SheetInboundEvent(TimestampMixin, Base):
+    __tablename__ = "sheet_inbound_events"
+    __table_args__ = (
+        UniqueConstraint("event_id", name="uq_sheet_inbound_event_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    event_id: Mapped[str] = mapped_column(String(255), index=True)
+    schema_version: Mapped[int] = mapped_column(Integer)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sheet_sources.id", ondelete="CASCADE"), index=True
+    )
+    crm_row_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    row_number: Mapped[int] = mapped_column(Integer)
+    changed_fields: Mapped[dict] = mapped_column(JSON, default=dict)
+    raw: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    origin: Mapped[str] = mapped_column(String(50))
+    correlation_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    status: Mapped[SheetEventStatus] = mapped_column(
+        Enum(SheetEventStatus, name="sheet_event_status"),
+        default=SheetEventStatus.RECEIVED,
+        index=True,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SheetWritebackEvent(TimestampMixin, Base):
+    __tablename__ = "sheet_writeback_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "correlation_id",
+            name="uq_sheet_writeback_correlation_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("sheet_sources.id", ondelete="CASCADE"), index=True
+    )
+    scenario_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("scenarios.id", ondelete="CASCADE"), index=True
+    )
+    crm_row_id: Mapped[uuid.UUID] = mapped_column(index=True)
+    changed_fields: Mapped[dict] = mapped_column(JSON, default=dict)
+    checksum: Mapped[str] = mapped_column(String(64), index=True)
+    origin: Mapped[str] = mapped_column(String(50), default="crm")
+    correlation_id: Mapped[str] = mapped_column(String(255), index=True)
+    status: Mapped[SheetWritebackStatus] = mapped_column(
+        Enum(SheetWritebackStatus, name="sheet_writeback_status"),
+        default=SheetWritebackStatus.PENDING,
+        index=True,
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ScenarioResearch(TimestampMixin, Base):

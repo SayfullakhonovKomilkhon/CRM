@@ -17,6 +17,8 @@ from crm.models import (
     PublisherStatus,
     Role,
     ScenarioStatus,
+    SheetEventStatus,
+    SheetWritebackStatus,
 )
 
 
@@ -223,6 +225,119 @@ class GoogleSheetsSyncRead(BaseModel):
     summary: GoogleSheetsRunSummary
     rows: list[GoogleSheetsRowResult]
     warnings: list[str]
+
+
+class SheetSourceCreate(WriteModel):
+    spreadsheet_id: str = Field(min_length=1, max_length=255)
+    source_tab: str = Field(min_length=1, max_length=255)
+    project_id: uuid.UUID
+    assigned_scenarist_id: uuid.UUID
+    header_row: int = Field(default=1, ge=1, le=10_000)
+    inbound_column_map: dict[str, int | str] = Field(default_factory=dict)
+    writeback_column_map: dict[str, int | str] = Field(default_factory=dict)
+    crm_row_id_column: str = Field(default="A", pattern=r"^[A-Za-z]{1,3}$")
+    enabled: bool = True
+
+
+class SheetSourceUpdate(WriteModel):
+    source_tab: str | None = Field(default=None, min_length=1, max_length=255)
+    project_id: uuid.UUID | None = None
+    assigned_scenarist_id: uuid.UUID | None = None
+    header_row: int | None = Field(default=None, ge=1, le=10_000)
+    inbound_column_map: dict[str, int | str] | None = None
+    writeback_column_map: dict[str, int | str] | None = None
+    crm_row_id_column: str | None = Field(default=None, pattern=r"^[A-Za-z]{1,3}$")
+    enabled: bool | None = None
+
+
+class SheetSourceRead(ORMModel):
+    id: uuid.UUID
+    spreadsheet_id: str
+    source_tab: str
+    project_id: uuid.UUID
+    assigned_scenarist_id: uuid.UUID
+    header_row: int
+    inbound_column_map: dict[str, int | str]
+    writeback_column_map: dict[str, int | str]
+    crm_row_id_column: str
+    enabled: bool
+    last_status: str | None
+    last_error: str | None
+    last_event_at: datetime | None
+    last_sync_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class SheetSourceCreated(SheetSourceRead):
+    webhook_secret: str
+
+
+class SheetWebhookEvent(WriteModel):
+    event_id: str = Field(min_length=1, max_length=255)
+    schema_version: Literal[1]
+    row_id: uuid.UUID
+    row_number: int = Field(ge=1)
+    changed_fields: dict[str, Any] = Field(min_length=1)
+    raw: dict[str, Any] = Field(default_factory=dict)
+    checksum: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
+    origin: Literal["sheets", "crm"]
+    correlation_id: str | None = Field(default=None, max_length=255)
+
+
+class SheetWebhookAccepted(BaseModel):
+    event_id: str
+    status: SheetEventStatus
+    duplicate: bool
+    queued: bool
+
+
+class SheetInboundEventRead(ORMModel):
+    id: uuid.UUID
+    event_id: str
+    schema_version: int
+    source_id: uuid.UUID
+    crm_row_id: uuid.UUID
+    row_number: int
+    changed_fields: dict[str, Any]
+    checksum: str
+    origin: str
+    correlation_id: str | None
+    status: SheetEventStatus
+    attempts: int
+    error: str | None
+    processed_at: datetime | None
+    created_at: datetime
+
+
+class SheetWritebackEventRead(ORMModel):
+    id: uuid.UUID
+    source_id: uuid.UUID
+    scenario_id: uuid.UUID
+    crm_row_id: uuid.UUID
+    changed_fields: dict[str, Any]
+    checksum: str
+    origin: str
+    correlation_id: str
+    status: SheetWritebackStatus
+    attempts: int
+    error: str | None
+    next_attempt_at: datetime | None
+    processed_at: datetime | None
+    created_at: datetime
+
+
+class SheetReconcileRequest(WriteModel):
+    apply: bool = False
+
+
+class SheetReconcileRead(BaseModel):
+    source_id: uuid.UUID
+    mode: Literal["preview"]
+    manual_preview_endpoint: str
+    tab: str
+    ready: bool
+    message: str
 
 
 class ClientCreate(BaseModel):

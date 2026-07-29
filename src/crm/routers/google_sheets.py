@@ -1,7 +1,9 @@
+import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -31,6 +33,9 @@ from crm.models import (
     GoogleSheetsSyncStatus,
     Project,
     Role,
+    SheetInboundEvent,
+    SheetSource,
+    SheetWritebackEvent,
     User,
 )
 from crm.schemas import (
@@ -42,9 +47,355 @@ from crm.schemas import (
     GoogleSheetsSyncRead,
     GoogleSheetsSyncRequest,
     GoogleSheetsTabStatus,
+    SheetInboundEventRead,
+    SheetReconcileRead,
+    SheetReconcileRequest,
+    SheetSourceCreate,
+    SheetSourceCreated,
+    SheetSourceRead,
+    SheetSourceUpdate,
+    SheetWebhookAccepted,
+    SheetWebhookEvent,
+    SheetWritebackEventRead,
+)
+from crm.sheet_sync import (
+    WRITEBACK_FIELDS,
+    column_letters,
+    enqueue_redis,
+    source_metadata_matches,
+    source_webhook_secret,
+    validate_column_map,
+    verify_webhook,
 )
 
 router = APIRouter(prefix="/google-sheets", tags=["google-sheets"])
+
+
+async def _source_targets(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    scenarist_id: uuid.UUID,
+) -> None:
+    project = await session.scalar(
+        select(Project).where(Project.id == project_id).options(selectinload(Project.client))
+    )
+    require_active_project(project)
+    require_assignable_scenarist(await session.get(User, scenarist_id))
+
+
+def _protect_identity_column(values: dict) -> None:
+    identity = values.get("crm_row_id_column", "A").strip().upper()
+    mapped = {
+        column_letters(reference)
+        for mapping_name in ("inbound_column_map", "writeback_column_map")
+        for reference in values.get(mapping_name, {}).values()
+    }
+    if identity in mapped:
+        raise HTTPException(
+            status_code=422,
+            detail="crm_row_id_column is protected and cannot map a workflow field",
+        )
+    values["crm_row_id_column"] = identity
+
+
+@router.get("/sources", response_model=list[SheetSourceRead])
+async def list_sheet_sources(
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> list[SheetSource]:
+    return list(
+        (
+            await session.scalars(
+                select(SheetSource).order_by(
+                    SheetSource.spreadsheet_id, SheetSource.source_tab
+                )
+            )
+        ).all()
+    )
+
+
+@router.post(
+    "/sources",
+    response_model=SheetSourceCreated,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_sheet_source(
+    payload: SheetSourceCreate,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> SheetSourceCreated:
+    await _source_targets(session, payload.project_id, payload.assigned_scenarist_id)
+    values = payload.model_dump()
+    values["source_tab"] = values.pop("source_tab").strip()
+    values["spreadsheet_id"] = values.pop("spreadsheet_id").strip()
+    values["inbound_column_map"] = validate_column_map(
+        values["inbound_column_map"], allowed_fields=SAFE_IMPORT_FIELDS
+    )
+    values["writeback_column_map"] = validate_column_map(
+        values["writeback_column_map"], allowed_fields=WRITEBACK_FIELDS
+    )
+    _protect_identity_column(values)
+    source = SheetSource(**values)
+    session.add(source)
+    try:
+        await session.flush()
+        secret = source_webhook_secret(settings, source)
+        await session.commit()
+        await session.refresh(source)
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This spreadsheet/tab source already exists",
+        ) from error
+    return SheetSourceCreated(
+        **SheetSourceRead.model_validate(source).model_dump(),
+        webhook_secret=secret,
+    )
+
+
+@router.get("/sources/{source_id}", response_model=SheetSourceRead)
+async def get_sheet_source(
+    source_id: uuid.UUID,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> SheetSource:
+    source = await session.get(SheetSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Sheet source not found")
+    return source
+
+
+@router.patch("/sources/{source_id}", response_model=SheetSourceRead)
+async def update_sheet_source(
+    source_id: uuid.UUID,
+    payload: SheetSourceUpdate,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> SheetSource:
+    source = await session.get(SheetSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Sheet source not found")
+    changes = payload.model_dump(exclude_unset=True)
+    project_id = changes.get("project_id", source.project_id)
+    scenarist_id = changes.get("assigned_scenarist_id", source.assigned_scenarist_id)
+    await _source_targets(session, project_id, scenarist_id)
+    if "inbound_column_map" in changes:
+        changes["inbound_column_map"] = validate_column_map(
+            changes["inbound_column_map"], allowed_fields=SAFE_IMPORT_FIELDS
+        )
+    if "writeback_column_map" in changes:
+        changes["writeback_column_map"] = validate_column_map(
+            changes["writeback_column_map"], allowed_fields=WRITEBACK_FIELDS
+        )
+    merged = {
+        "crm_row_id_column": changes.get(
+            "crm_row_id_column", source.crm_row_id_column
+        ),
+        "inbound_column_map": changes.get(
+            "inbound_column_map", source.inbound_column_map
+        ),
+        "writeback_column_map": changes.get(
+            "writeback_column_map", source.writeback_column_map
+        ),
+    }
+    _protect_identity_column(merged)
+    changes["crm_row_id_column"] = merged["crm_row_id_column"]
+    for key, value in changes.items():
+        setattr(source, key, value.strip() if key == "source_tab" else value)
+    try:
+        await session.commit()
+        await session.refresh(source)
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Spreadsheet/tab already exists") from error
+    return source
+
+
+@router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def disable_sheet_source(
+    source_id: uuid.UUID,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Soft-delete a source so event history and scenario identity remain auditable."""
+    source = await session.get(SheetSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Sheet source not found")
+    source.enabled = False
+    source.last_status = "disabled"
+    await session.commit()
+
+
+@router.post("/sources/{source_id}/rotate-secret", response_model=SheetSourceCreated)
+async def rotate_sheet_source_secret(
+    source_id: uuid.UUID,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> SheetSourceCreated:
+    source = await session.get(SheetSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Sheet source not found")
+    source.webhook_secret_version += 1
+    await session.commit()
+    await session.refresh(source)
+    return SheetSourceCreated(
+        **SheetSourceRead.model_validate(source).model_dump(),
+        webhook_secret=source_webhook_secret(settings, source),
+    )
+
+
+@router.post(
+    "/webhook/{source_id}",
+    response_model=SheetWebhookAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def receive_sheet_webhook(
+    source_id: uuid.UUID,
+    request: Request,
+    payload: SheetWebhookEvent,
+    x_crm_timestamp: str | None = Header(default=None),
+    x_crm_signature: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> SheetWebhookAccepted:
+    source = await session.get(SheetSource, source_id)
+    if source is None or not source.enabled:
+        raise HTTPException(status_code=404, detail="Sheet source not found")
+    body = await request.body()
+    verify_webhook(
+        secret=source_webhook_secret(settings, source),
+        timestamp=x_crm_timestamp,
+        signature=x_crm_signature,
+        body=body,
+        now=datetime.now(UTC),
+        max_age_seconds=settings.sheet_webhook_max_age_seconds,
+    )
+    if not source_metadata_matches(source, payload.raw):
+        raise HTTPException(
+            status_code=403,
+            detail="Webhook source metadata does not match the registered source",
+        )
+    if canonical_checksum(payload.changed_fields) != payload.checksum.lower():
+        raise HTTPException(status_code=422, detail="Webhook checksum mismatch")
+    existing = await session.scalar(
+        select(SheetInboundEvent).where(
+            SheetInboundEvent.event_id == payload.event_id
+        )
+    )
+    if existing is not None:
+        return SheetWebhookAccepted(
+            event_id=existing.event_id,
+            status=existing.status,
+            duplicate=True,
+            queued=False,
+        )
+    event = SheetInboundEvent(
+        event_id=payload.event_id,
+        schema_version=payload.schema_version,
+        source_id=source.id,
+        crm_row_id=payload.row_id,
+        row_number=payload.row_number,
+        changed_fields=payload.changed_fields,
+        raw=payload.raw,
+        checksum=payload.checksum.lower(),
+        origin=payload.origin,
+        correlation_id=payload.correlation_id,
+    )
+    session.add(event)
+    source.last_status = "inbound_received"
+    source.last_event_at = datetime.now(UTC)
+    try:
+        await session.commit()
+        await session.refresh(event)
+    except IntegrityError:
+        await session.rollback()
+        existing = await session.scalar(
+            select(SheetInboundEvent).where(
+                SheetInboundEvent.event_id == payload.event_id
+            )
+        )
+        if existing is None:
+            raise
+        return SheetWebhookAccepted(
+            event_id=existing.event_id,
+            status=existing.status,
+            duplicate=True,
+            queued=False,
+        )
+    queued = await enqueue_redis(settings, "crm:sheet:inbound", event.id)
+    return SheetWebhookAccepted(
+        event_id=event.event_id,
+        status=event.status,
+        duplicate=False,
+        queued=queued,
+    )
+
+
+@router.get("/inbound-events", response_model=list[SheetInboundEventRead])
+async def list_inbound_events(
+    source_id: uuid.UUID | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> list[SheetInboundEvent]:
+    query = select(SheetInboundEvent)
+    if source_id is not None:
+        query = query.where(SheetInboundEvent.source_id == source_id)
+    return list(
+        (
+            await session.scalars(
+                query.order_by(SheetInboundEvent.created_at.desc()).limit(limit)
+            )
+        ).all()
+    )
+
+
+@router.get("/writeback-events", response_model=list[SheetWritebackEventRead])
+async def list_writeback_events(
+    source_id: uuid.UUID | None = None,
+    limit: int = Query(100, ge=1, le=500),
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> list[SheetWritebackEvent]:
+    query = select(SheetWritebackEvent)
+    if source_id is not None:
+        query = query.where(SheetWritebackEvent.source_id == source_id)
+    return list(
+        (
+            await session.scalars(
+                query.order_by(SheetWritebackEvent.created_at.desc()).limit(limit)
+            )
+        ).all()
+    )
+
+
+@router.post("/sources/{source_id}/reconcile", response_model=SheetReconcileRead)
+async def reconcile_sheet_source(
+    source_id: uuid.UUID,
+    payload: SheetReconcileRequest,
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> SheetReconcileRead:
+    source = await session.get(SheetSource, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Sheet source not found")
+    if payload.apply:
+        raise HTTPException(
+            status_code=409,
+            detail="Reconcile is preview-only; confirm through the existing preview/sync flow",
+        )
+    return SheetReconcileRead(
+        source_id=source.id,
+        mode="preview",
+        manual_preview_endpoint="/api/v1/google-sheets/preview",
+        tab=source.source_tab,
+        ready=bool(settings.google_service_account_json),
+        message="Use the existing preview endpoint, review rows, then confirm sync",
+    )
 
 
 def _tab_config(settings: Settings, requested_tab: str) -> GoogleSheetsTabConfig:

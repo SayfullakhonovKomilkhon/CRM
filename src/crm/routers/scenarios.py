@@ -76,6 +76,7 @@ from crm.schemas import (
     normalize_http_url,
 )
 from crm.sheet import columns_for_role, editable_fields_for_role, values_for_role
+from crm.sheet_sync import enqueue_sheet_writeback
 from crm.workflow import (
     EDITOR_ACTION_STATUSES,
     EDITOR_MANAGER_VISIBLE_STATUSES,
@@ -1369,6 +1370,11 @@ async def patch_scenario_sheet_row(
             scenario.status = status_after_unpublishing(scenario)
 
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {change.field: change.value for change in payload.changes},
+    )
     await session.commit()
     await session.refresh(scenario)
     return SheetRowPatchResult(
@@ -1409,6 +1415,7 @@ async def update_scenario(
             )
 
     changes = payload.model_dump(exclude_unset=True, exclude={"research", "content"})
+    writeback_changes = dict(changes)
     if "assigned_scenarist_id" in changes:
         if user.role != Role.MANAGER:
             raise HTTPException(
@@ -1431,6 +1438,7 @@ async def update_scenario(
             scenario.research = ScenarioResearch()
         for key, value in payload.research.model_dump(exclude_unset=True).items():
             setattr(scenario.research, key, value)
+            writeback_changes[f"research.{key}"] = value
     if payload.content is not None:
         if scenario.content is None:
             scenario.content = ScenarioContent()
@@ -1438,6 +1446,7 @@ async def update_scenario(
             script_changed = scenario.content.script_text != payload.content.script_text
         for key, value in payload.content.model_dump(exclude_unset=True).items():
             setattr(scenario.content, key, value)
+            writeback_changes[f"content.{key}"] = value
 
     if script_changed:
         reset_approvals_from(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
@@ -1451,6 +1460,7 @@ async def update_scenario(
         scenario.status = ScenarioStatus.IN_REVIEW
 
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(session, scenario, writeback_changes)
     await session.commit()
     updated = await session.scalar(
         select(Scenario).where(Scenario.id == scenario.id).options(*LOAD_SCENARIO)
@@ -1514,6 +1524,24 @@ async def set_approval(
         open_final_revision_gate(scenario, payload.comment or "")
     scenario.status = status_after_decision(scenario, stage, payload.decision)
     scenario.updated_at = datetime.now(UTC)
+    approval_writeback = {
+        f"approval.{stage.value}.decision": payload.decision.value,
+        f"approval.{stage.value}.comment": payload.comment,
+    }
+    if "note" in payload.model_fields_set:
+        approval_writeback[f"approval.{stage.value}.note"] = payload.note
+    if stage == ApprovalStage.FINAL_CLIENT and scenario.final_revision_gate is not None:
+        approval_writeback.update(
+            {
+                "final_revision_gate.request_comment": (
+                    scenario.final_revision_gate.request_comment
+                ),
+                "final_revision_gate.decision": (
+                    scenario.final_revision_gate.decision.value
+                ),
+            }
+        )
+    await enqueue_sheet_writeback(session, scenario, approval_writeback)
     await session.commit()
     await session.refresh(approval)
     return approval
@@ -1555,6 +1583,14 @@ async def decide_final_revision_gate(
         scenario, payload.decision, payload.comment, user
     )
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {
+            "final_revision_gate.decision": gate.decision.value,
+            "final_revision_gate.manager_comment": gate.manager_comment,
+        },
+    )
     await session.commit()
     await session.refresh(gate)
     return gate
@@ -1600,6 +1636,11 @@ async def create_comment(
     )
     session.add(comment)
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {"comments.latest": payload.text},
+    )
     await session.commit()
     await session.refresh(comment)
     return comment
@@ -1654,6 +1695,11 @@ async def update_montage(
     if scenario.montage.assigned_editor_id and is_approved(scenario, ApprovalStage.SOURCE_MATERIAL):
         scenario.status = ScenarioStatus.HANDED_TO_EDITOR
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {f"montage.{key}": value for key, value in montage_changes.items()},
+    )
     await session.commit()
     updated = await get_visible_scenario(session, scenario.id, user)
     return updated.montage
@@ -1688,6 +1734,11 @@ async def update_montage_as_editor(
         reset_approvals_from(scenario, ApprovalStage.MONTAGE_COMPLIANCE)
     scenario.status = ScenarioStatus.EDITING
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {f"montage.{key}": value for key, value in editor_changes.items()},
+    )
     await session.commit()
     await session.refresh(scenario.montage)
     return scenario.montage
@@ -1719,6 +1770,11 @@ async def update_publication(
         reset_publication_review(scenario.publication)
         scenario.status = ScenarioStatus.APPROVED
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {f"publication.{key}": value for key, value in publication_changes.items()},
+    )
     await session.commit()
     await session.refresh(scenario.publication)
     return scenario.publication
@@ -1744,6 +1800,18 @@ async def review_publication(
         user,
     )
     scenario.updated_at = datetime.now(UTC)
+    publication = scenario.publication
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {
+            "publication.manager_review_decision": (
+                publication.manager_review_decision.value
+            ),
+            "publication.manager_review_comment": publication.manager_review_comment,
+            "publication.assigned_publisher_id": publication.assigned_publisher_id,
+        },
+    )
     await session.commit()
     updated = await get_visible_scenario(session, scenario.id, user)
     return updated.publication
@@ -1775,6 +1843,15 @@ async def update_publication_as_publisher(
         scenario, payload.status, payload.comment, urls
     )
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {
+            "publication.publisher_status": publication.publisher_status.value,
+            "publication.publisher_comment": publication.publisher_comment,
+            **{f"publication.{key}": value for key, value in urls.items()},
+        },
+    )
     await session.commit()
     await session.refresh(publication)
     return publication
