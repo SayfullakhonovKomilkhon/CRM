@@ -17,17 +17,21 @@ from crm.models import (
     Scenario,
     ScenarioStatus,
     SheetSource,
+    SheetWritebackStatus,
 )
 from crm.routers import scenarios as scenario_routes
 from crm.sheet_sync import (
     WRITEBACK_FIELDS,
     _set_values,
     active_scenarist_revision_stage,
+    append_row_values,
     column_letters,
+    column_number,
     enqueue_sheet_writeback,
     finalize_inbound_revision,
     inbound_update_allowed,
     process_inbound_event,
+    process_writeback_event,
     source_metadata_matches,
     source_webhook_secret,
     validate_column_map,
@@ -225,11 +229,35 @@ def test_identity_column_is_separate_from_workflow_allowlist():
     assert "crm_row_id" not in WRITEBACK_FIELDS
     assert column_letters(1) == "A"
     assert column_letters(27) == "AA"
+    assert column_number("CA") == 79
     with pytest.raises(HTTPException):
         validate_column_map(
             {"workflow.not_allowed": "B"},
             allowed_fields=WRITEBACK_FIELDS,
         )
+
+
+def test_new_sheet_row_places_fields_and_identity_in_sparse_columns():
+    row_id = uuid.uuid4()
+    source = SimpleNamespace(
+        crm_row_id_column="CA",
+        writeback_column_map={
+            "external_id": "B",
+            "content.script_text": "T",
+        },
+    )
+
+    last_column, values = append_row_values(
+        source,
+        row_id,
+        {"external_id": "124", "content.script_text": "Новый сценарий"},
+    )
+
+    assert last_column == "CA"
+    assert len(values) == 79
+    assert values[1] == "124"
+    assert values[19] == "Новый сценарий"
+    assert values[78] == str(row_id)
 
 
 class FakeSession:
@@ -343,6 +371,130 @@ async def test_google_write_reports_429_after_retry_budget(monkeypatch):
         )
 
 
+async def test_google_append_returns_created_row_and_identity_lookup(monkeypatch):
+    responses = [
+        httpx.Response(
+            200,
+            json={"values": [["other"], ["target-row-id"]]},
+        ),
+        httpx.Response(
+            200,
+            json={"updates": {"updatedRange": "'сценарий'!A128:CA128"}},
+        ),
+    ]
+
+    class FakeHttpClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return responses.pop(0)
+
+        async def post(self, *_args, **_kwargs):
+            return responses.pop(0)
+
+    async def token(_self):
+        return "token"
+
+    monkeypatch.setattr(GoogleSheetsClient, "_access_token", token)
+    monkeypatch.setattr(
+        "crm.google_sheets.httpx.AsyncClient",
+        lambda **_kwargs: FakeHttpClient(),
+    )
+    client = object.__new__(GoogleSheetsClient)
+
+    assert (
+        await client.find_value_row(
+            "sheet",
+            "сценарий",
+            "CA",
+            "target-row-id",
+            first_row=5,
+        )
+        == 6
+    )
+    assert await client.append_row(
+        "sheet",
+        "сценарий",
+        "CA",
+        ["", "124"],
+    ) == 128
+
+
+@pytest.mark.parametrize("existing_row", [None, 128])
+async def test_writeback_creates_or_recovers_new_sheet_row_idempotently(existing_row):
+    source_id = uuid.uuid4()
+    scenario_id = uuid.uuid4()
+    row_id = uuid.uuid4()
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=SheetWritebackStatus.PENDING,
+        attempts=0,
+        source_id=source_id,
+        scenario_id=scenario_id,
+        crm_row_id=row_id,
+        changed_fields={"external_id": "124"},
+        error=None,
+        next_attempt_at=None,
+        processed_at=None,
+    )
+    source = SimpleNamespace(
+        id=source_id,
+        enabled=True,
+        spreadsheet_id="sheet",
+        source_tab="сценарий",
+        header_row=4,
+        crm_row_id_column="CA",
+        writeback_column_map={"external_id": "B"},
+        last_status=None,
+        last_error=None,
+        last_sync_at=None,
+    )
+    scenario = SimpleNamespace(
+        id=scenario_id,
+        crm_row_id=row_id,
+        source_row=None,
+        source_sheet_id="sheet",
+        source_tab="сценарий",
+    )
+
+    class FakeSession:
+        async def scalar(self, _query):
+            return event
+
+        async def get(self, model, _identifier):
+            return source if model is SheetSource else scenario
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    class FakeClient:
+        def __init__(self):
+            self.append_calls = 0
+            self.updates = []
+
+        async def find_value_row(self, *_args, **_kwargs):
+            return existing_row
+
+        async def append_row(self, *_args, **_kwargs):
+            self.append_calls += 1
+            return 128
+
+        async def batch_update_values(self, _spreadsheet_id, updates, **_kwargs):
+            self.updates = updates
+
+    client = FakeClient()
+    result = await process_writeback_event(FakeSession(), event.id, client)
+
+    assert result.status == SheetWritebackStatus.COMPLETED
+    assert scenario.source_row == 128
+    assert client.append_calls == (0 if existing_row else 1)
+    assert client.updates[0]["range"] == "'сценарий'!CA128"
+
+
 def test_models_define_idempotency_and_stable_row_constraints():
     inbound_constraints = {
         constraint.name
@@ -375,6 +527,7 @@ def test_openapi_documents_management_webhook_and_event_contracts():
 @pytest.mark.parametrize(
     "handler",
     [
+        scenario_routes.create_scenario,
         scenario_routes.patch_scenario_sheet_row,
         scenario_routes.update_scenario,
         scenario_routes.set_approval,

@@ -36,6 +36,7 @@ from crm.models import (
     ScenarioContent,
     ScenarioResearch,
     ScenarioStatus,
+    SheetSource,
     User,
 )
 from crm.schemas import (
@@ -851,9 +852,40 @@ async def create_scenario(
         payload.assigned_scenarist_id,
         requested_scenarist,
     )
+    sheet_sources = list(
+        (
+            await session.scalars(
+                select(SheetSource)
+                .where(
+                    SheetSource.project_id == payload.project_id,
+                    SheetSource.enabled.is_(True),
+                )
+                .order_by(SheetSource.created_at)
+            )
+        ).all()
+    )
+    exact_sources = [
+        source
+        for source in sheet_sources
+        if source.assigned_scenarist_id == assigned_scenarist_id
+    ]
+    sheet_source = (
+        exact_sources[0]
+        if len(exact_sources) == 1
+        else sheet_sources[0]
+        if len(sheet_sources) == 1
+        else None
+    )
 
     data = payload.model_dump(exclude={"research", "content"})
     data["assigned_scenarist_id"] = assigned_scenarist_id
+    if sheet_source is not None:
+        data.update(
+            sheet_source_id=sheet_source.id,
+            crm_row_id=uuid.uuid4(),
+            source_sheet_id=sheet_source.spreadsheet_id,
+            source_tab=sheet_source.source_tab,
+        )
     if session.get_bind().dialect.name != "postgresql":
         existing_ids = await session.scalars(select(Scenario.external_id))
         numeric_ids = [
@@ -867,6 +899,63 @@ async def create_scenario(
         scenario.content = ScenarioContent(**payload.content.model_dump())
     session.add(scenario)
     try:
+        await session.flush()
+        create_writeback: dict[str, object] = {
+            "external_id": scenario.external_id,
+            "scenario_date": scenario.scenario_date,
+            "deadline": scenario.deadline,
+            "score": scenario.score,
+            "scenario_type": scenario.scenario_type,
+            "visual_format": scenario.visual_format,
+            "speaker": scenario.speaker,
+        }
+        if scenario.research:
+            create_writeback.update(
+                {
+                    f"research.{field_name}": getattr(scenario.research, field_name)
+                    for field_name in (
+                        "competitor_url",
+                        "competitor_category",
+                        "full_analysis",
+                        "performance_metrics",
+                        "transcription",
+                        "timeline",
+                        "why_viral",
+                        "takeaways",
+                        "improvements",
+                        "replication_template",
+                        "ai_analysis",
+                    )
+                }
+            )
+        if scenario.content:
+            create_writeback.update(
+                {
+                    f"content.{field_name}": getattr(scenario.content, field_name)
+                    for field_name in (
+                        "claude_context",
+                        "cover_text",
+                        "script_text",
+                        "montage_brief",
+                        "scenarist_comment",
+                        "hook",
+                        "retention",
+                        "call_to_action",
+                        "visual_notes",
+                        "score_recommendations",
+                        "ai_review",
+                    )
+                }
+            )
+        await enqueue_sheet_writeback(
+            session,
+            scenario,
+            {
+                field_name: value
+                for field_name, value in create_writeback.items()
+                if value is not None
+            },
+        )
         await session.commit()
     except IntegrityError as error:
         await session.rollback()

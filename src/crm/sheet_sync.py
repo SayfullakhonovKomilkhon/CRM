@@ -245,6 +245,18 @@ async def lock_source_row(
         )
 
 
+async def lock_source_append(
+    session: AsyncSession,
+    source_id: uuid.UUID,
+) -> None:
+    """Serialize append position allocation for one Sheet source."""
+    if session.get_bind().dialect.name == "postgresql":
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"{source_id}:append"},
+        )
+
+
 def _set_values(scenario: Scenario, changed_fields: dict[str, Any]) -> None:
     scenario_values: dict[str, Any] = {}
     research_values: dict[str, Any] = {}
@@ -500,6 +512,35 @@ def column_letters(reference: int | str) -> str:
     return result
 
 
+def column_number(reference: int | str) -> int:
+    if isinstance(reference, int):
+        if not 1 <= reference <= 18_278:
+            raise ValueError("Invalid column number")
+        return reference
+    value = 0
+    for character in column_letters(reference):
+        value = value * 26 + ord(character) - 64
+    return value
+
+
+def append_row_values(
+    source: SheetSource,
+    crm_row_id: uuid.UUID,
+    changed_fields: dict[str, Any],
+) -> tuple[str, list[Any]]:
+    mapped = {
+        column_number(source.writeback_column_map[field_name]): value
+        for field_name, value in changed_fields.items()
+    }
+    identity_column = column_number(source.crm_row_id_column)
+    mapped[identity_column] = str(crm_row_id)
+    last_column = max(mapped)
+    values = [""] * last_column
+    for column, value in mapped.items():
+        values[column - 1] = value
+    return column_letters(last_column), values
+
+
 async def process_writeback_event(
     session: AsyncSession,
     event_id: uuid.UUID,
@@ -524,7 +565,7 @@ async def process_writeback_event(
         event.status = SheetWritebackStatus.FAILED
         event.error = "Sheet source/scenario is missing or source is disabled"
         return event
-    if scenario.crm_row_id != event.crm_row_id or scenario.source_row is None:
+    if scenario.crm_row_id != event.crm_row_id:
         event.status = SheetWritebackStatus.FAILED
         event.error = "Scenario source identity is inconsistent"
         return event
@@ -537,6 +578,51 @@ async def process_writeback_event(
         event.status = SheetWritebackStatus.FAILED
         event.error = "Writeback contains fields outside the source allowlist"
         return event
+    if scenario.source_row is None:
+        await lock_source_append(session, source.id)
+        identity_value = str(event.crm_row_id)
+        try:
+            source_row = await client.find_value_row(
+                source.spreadsheet_id,
+                source.source_tab,
+                source.crm_row_id_column,
+                identity_value,
+                first_row=source.header_row + 1,
+            )
+            if source_row is None:
+                last_column, row_values = append_row_values(
+                    source,
+                    event.crm_row_id,
+                    approved,
+                )
+                try:
+                    source_row = await client.append_row(
+                        source.spreadsheet_id,
+                        source.source_tab,
+                        last_column,
+                        row_values,
+                    )
+                except GoogleSheetsSourceError:
+                    # The request may have reached Google even if its response was lost.
+                    source_row = await client.find_value_row(
+                        source.spreadsheet_id,
+                        source.source_tab,
+                        source.crm_row_id_column,
+                        identity_value,
+                        first_row=source.header_row + 1,
+                    )
+                    if source_row is None:
+                        raise
+            scenario.source_row = source_row
+            scenario.source_sheet_id = source.spreadsheet_id
+            scenario.source_tab = source.source_tab
+        except GoogleSheetsSourceError as error:
+            event.status = SheetWritebackStatus.FAILED
+            event.error = str(error)
+            event.next_attempt_at = retry_at(event.attempts)
+            source.last_status = "writeback_failed"
+            source.last_error = str(error)
+            return event
     escaped_tab = source.source_tab.replace("'", "''")
     updates = [
         {

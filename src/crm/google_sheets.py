@@ -1052,6 +1052,94 @@ class GoogleSheetsClient:
                     )
                 return
 
+    async def find_value_row(
+        self,
+        spreadsheet_id: str,
+        tab: str,
+        column: str,
+        value: str,
+        *,
+        first_row: int,
+    ) -> int | None:
+        """Return the row containing an exact protected identity value."""
+        token = await self._access_token()
+        escaped_tab = tab.replace("'", "''")
+        range_name = f"'{escaped_tab}'!{column}{first_row}:{column}"
+        url = (
+            "https://sheets.googleapis.com/v4/spreadsheets/"
+            f"{quote(spreadsheet_id, safe='')}/values/{quote(range_name, safe='')}"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={"majorDimension": "ROWS", "valueRenderOption": "FORMATTED_VALUE"},
+                )
+        except httpx.HTTPError as error:
+            raise GoogleSheetsSourceError("Google Sheets identity lookup failed") from error
+        if response.status_code in {401, 403}:
+            raise GoogleSheetsSourceError(
+                "Service account cannot read the configured spreadsheet"
+            )
+        if response.status_code >= 400:
+            raise GoogleSheetsSourceError(
+                f"Google Sheets API returned HTTP {response.status_code}"
+            )
+        rows = response.json().get("values", [])
+        for offset, row in enumerate(rows):
+            if row and str(row[0]).strip() == value:
+                return first_row + offset
+        return None
+
+    async def append_row(
+        self,
+        spreadsheet_id: str,
+        tab: str,
+        last_column: str,
+        values: list[Any],
+    ) -> int:
+        """Atomically append one row and return the physical Google Sheets row."""
+        token = await self._access_token()
+        escaped_tab = tab.replace("'", "''")
+        range_name = f"'{escaped_tab}'!A:{last_column}"
+        url = (
+            "https://sheets.googleapis.com/v4/spreadsheets/"
+            f"{quote(spreadsheet_id, safe='')}/values/"
+            f"{quote(range_name, safe='')}:append"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    params={
+                        "valueInputOption": "RAW",
+                        "insertDataOption": "INSERT_ROWS",
+                        "includeValuesInResponse": "false",
+                    },
+                    json={"majorDimension": "ROWS", "values": [values]},
+                )
+        except httpx.HTTPError as error:
+            raise GoogleSheetsSourceError("Google Sheets append request failed") from error
+        if response.status_code in {401, 403}:
+            raise GoogleSheetsSourceError(
+                "Service account cannot write to the configured spreadsheet"
+            )
+        if response.status_code >= 400:
+            raise GoogleSheetsSourceError(
+                f"Google Sheets API returned HTTP {response.status_code}"
+            )
+        updated_range = (
+            response.json().get("updates", {}).get("updatedRange", "")
+        )
+        match = re.search(r"![A-Z]+(\d+):[A-Z]+\d+$", updated_range)
+        if not match:
+            raise GoogleSheetsSourceError(
+                "Google Sheets append response did not include the created row"
+            )
+        return int(match.group(1))
+
 
 _google_sheets_clients: dict[str, GoogleSheetsClient] = {}
 
