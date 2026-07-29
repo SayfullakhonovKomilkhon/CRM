@@ -493,8 +493,22 @@ async def _snapshot(
     settings: Settings,
     spreadsheet_id: str,
     config: GoogleSheetsTabConfig,
+    source: SheetSource | None = None,
 ):
     try:
+        effective_config = config
+        if source:
+            registered_columns = {
+                **source.inbound_column_map,
+                **{
+                    field_name: reference
+                    for field_name, reference in source.writeback_column_map.items()
+                    if field_name in SAFE_IMPORT_FIELDS
+                },
+            }
+            effective_config = config.model_copy(
+                update={"columns": {**config.columns, **registered_columns}}
+            )
         values = await google_sheets_client(settings).fetch_values(
             spreadsheet_id,
             config.tab,
@@ -503,9 +517,10 @@ async def _snapshot(
         )
         return parse_sheet_values(
             values,
-            config,
+            effective_config,
             spreadsheet_id,
             settings.google_sheets_max_rows,
+            crm_row_id_column=source.crm_row_id_column if source else None,
         )
     except GoogleSheetsConfigurationError as error:
         raise HTTPException(
@@ -517,6 +532,20 @@ async def _snapshot(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(error),
         ) from error
+
+
+async def _registered_source(
+    session: AsyncSession,
+    spreadsheet_id: str,
+    tab: str,
+) -> SheetSource | None:
+    return await session.scalar(
+        select(SheetSource).where(
+            SheetSource.spreadsheet_id == spreadsheet_id,
+            SheetSource.source_tab == tab,
+            SheetSource.enabled.is_(True),
+        )
+    )
 
 
 @router.get("/status", response_model=GoogleSheetsStatusRead)
@@ -562,8 +591,11 @@ async def preview_google_sheets(
     spreadsheet_id = _require_ready(settings)
     config = _tab_config(settings, payload.tab)
     await _validate_targets(session, config)
-    snapshot = await _snapshot(settings, spreadsheet_id, config)
-    planned = await plan_rows(session, snapshot, spreadsheet_id, config.tab)
+    source = await _registered_source(session, spreadsheet_id, config.tab)
+    snapshot = await _snapshot(settings, spreadsheet_id, config, source)
+    planned = await plan_rows(
+        session, snapshot, spreadsheet_id, config.tab, source=source
+    )
     results = [item.result() for item in planned]
     run_status = (
         GoogleSheetsSyncStatus.VALIDATION_FAILED
@@ -630,7 +662,8 @@ async def sync_google_sheets(
             detail="Preview expired; run preview again",
         )
 
-    snapshot = await _snapshot(settings, spreadsheet_id, config)
+    source = await _registered_source(session, spreadsheet_id, config.tab)
+    snapshot = await _snapshot(settings, spreadsheet_id, config, source)
     if snapshot.checksum != preview.snapshot_checksum:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -643,6 +676,7 @@ async def sync_google_sheets(
         spreadsheet_id,
         config.tab,
         for_update=True,
+        source=source,
     )
     current_results = [item.result() for item in planned]
     if canonical_checksum(serialized_row_report(current_results)) != canonical_checksum(
@@ -658,7 +692,31 @@ async def sync_google_sheets(
             detail="Preview contains validation errors and cannot be synchronized",
         )
 
-    results = await apply_planned_rows(session, planned, spreadsheet_id, config)
+    results = await apply_planned_rows(
+        session, planned, spreadsheet_id, config, source=source
+    )
+    if source:
+        escaped_source_tab = source.source_tab.replace("'", "''")
+        identity_updates = [
+            {
+                "range": (
+                    f"'{escaped_source_tab}'!"
+                    f"{source.crm_row_id_column}{item.parsed.row_number}"
+                ),
+                "majorDimension": "ROWS",
+                "values": [[str(item.existing.crm_row_id)]],
+            }
+            for item in planned
+            if item.parsed.crm_row_id is None
+            and item.existing is not None
+            and item.existing.crm_row_id is not None
+        ]
+        if identity_updates:
+            await google_sheets_client(settings).batch_update_values(
+                spreadsheet_id,
+                identity_updates,
+                max_retries=settings.sheet_google_max_retries,
+            )
     run = _new_run(
         spreadsheet_id=spreadsheet_id,
         config=config,

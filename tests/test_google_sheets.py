@@ -9,13 +9,14 @@ from crm.config import GoogleSheetsTabConfig, Settings
 from crm.google_sheets import (
     GoogleSheetsConfigurationError,
     GoogleSheetsSourceError,
+    _apply_workflow_values,
     canonical_checksum,
     parse_date,
     parse_sheet_values,
     resolve_columns,
     workflow_is_locked,
 )
-from crm.models import ScenarioStatus
+from crm.models import ApprovalDecision, ApprovalStage, Scenario, ScenarioContent, ScenarioStatus
 from crm.schemas import ScenarioCreate
 
 
@@ -70,9 +71,87 @@ def test_resolve_columns_supports_explicit_header_and_rejects_unsafe_fields():
     assert resolved["scenario_date"] == 0
     assert resolved["content.script_text"] == 1
 
-    unsafe = tab_config(columns={"publication.is_published": 1})
+    by_letters, _ = resolve_columns(
+        ["Created", "Body"],
+        tab_config(columns={"content.script_text": "B"}),
+    )
+    assert by_letters["content.script_text"] == 1
+
+    unsafe = tab_config(columns={"unknown.private_field": 1})
     with pytest.raises(GoogleSheetsConfigurationError, match="Unsupported"):
         resolve_columns(["Published"], unsafe)
+
+
+def test_parse_sheet_values_imports_workflow_montage_publication_and_identity():
+    row_id = uuid.uuid4()
+    snapshot = parse_sheet_values(
+        [
+            [
+                "Сценарий",
+                "Одобрение ответственного",
+                "Одобрение сценария клиентом",
+                "Одобрение исходника",
+                "Проверка монтажа по ТЗ",
+                "Одобрение готового клиентом",
+                "Монтажёр",
+                "Цена монтажа",
+                "Готовый материал",
+                "Дата публикации",
+                "Опубликовано",
+                "",
+            ],
+            [
+                "Полный сценарий",
+                "Одобрено",
+                "Одобрено",
+                "Доработать",
+                "Отказ",
+                "Ожидает",
+                "Алексей",
+                "400,50",
+                "https://example.com/video",
+                "25.07",
+                "TRUE",
+                str(row_id),
+            ],
+        ],
+        tab_config(),
+        "sheet-id",
+        100,
+        crm_row_id_column="L",
+    )
+
+    row = snapshot.rows[0]
+    assert row.errors == []
+    assert row.crm_row_id == row_id
+    assert row.payload["approval"]["responsible_review"]["decision"] == "approved"
+    assert row.payload["approval"]["source_material"]["decision"] == "revision"
+    assert row.payload["approval"]["montage_compliance"]["decision"] == "rejected"
+    assert row.payload["montage"]["price"] == 400.50
+    assert row.payload["publication"]["is_published"] is True
+    assert row.source_payload["L"]["value"] == str(row_id)
+
+
+def test_workflow_import_derives_published_status_and_keeps_all_decisions():
+    scenario = Scenario(project_id=uuid.uuid4(), status=ScenarioStatus.DRAFT)
+    scenario.content = ScenarioContent(script_text="Сценарий")
+    payload = {
+        "approval": {
+            "responsible_review": {"decision": ApprovalDecision.APPROVED},
+            "pre_generation_client": {"decision": ApprovalDecision.APPROVED},
+            "source_material": {"decision": ApprovalDecision.APPROVED},
+            "montage_compliance": {"decision": ApprovalDecision.APPROVED},
+            "final_client": {"decision": ApprovalDecision.APPROVED},
+        },
+        "publication": {"is_published": True},
+    }
+
+    _apply_workflow_values(scenario, payload)
+
+    assert scenario.status == ScenarioStatus.PUBLISHED
+    assert {item.stage for item in scenario.approvals} == set(ApprovalStage)
+    assert all(item.decision == ApprovalDecision.APPROVED for item in scenario.approvals)
+    assert scenario.publication.is_published is True
 
 
 def test_resolve_columns_rejects_one_column_mapped_to_two_fields():

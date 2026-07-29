@@ -196,6 +196,7 @@ class Scenario(TimestampMixin, Base):
     source_tab: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_row: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_checksum: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    source_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     sheet_source_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("sheet_sources.id", ondelete="SET NULL"), nullable=True, index=True
     )

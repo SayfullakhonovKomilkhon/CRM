@@ -33,6 +33,7 @@ from crm.sheet_sync import (
     validate_column_map,
     verify_webhook,
     webhook_signature,
+    workflow_fields_only,
 )
 
 
@@ -111,6 +112,38 @@ def test_inbound_values_use_scenario_validation_before_mutation():
     with pytest.raises(ValidationError, match="less than or equal to 100"):
         _set_values(value, {"score": 101})
     assert value.score is None
+
+
+def test_inbound_workflow_statuses_are_coerced_and_applied():
+    value = Scenario(
+        project_id=uuid.uuid4(),
+        assigned_scenarist_id=uuid.uuid4(),
+        external_id="workflow-test",
+    )
+    value.content = __import__(
+        "crm.models", fromlist=["ScenarioContent"]
+    ).ScenarioContent(script_text="Сценарий")
+
+    _set_values(
+        value,
+        {
+            "approval.responsible_review.decision": "Одобрено",
+            "approval.pre_generation_client.decision": "Доработать",
+            "approval.pre_generation_client.comment": "Исправьте вступление",
+        },
+    )
+
+    assert value.status == ScenarioStatus.REVISION
+    client = next(
+        item
+        for item in value.approvals
+        if item.stage == ApprovalStage.PRE_GENERATION_CLIENT
+    )
+    assert client.decision == ApprovalDecision.REVISION
+    assert client.comment == "Исправьте вступление"
+    assert workflow_fields_only(
+        {"publication.is_published": "TRUE"}
+    )
 
 
 def test_inbound_update_eager_loads_mutable_scenario_relationships():

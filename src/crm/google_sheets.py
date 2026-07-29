@@ -2,8 +2,10 @@ import asyncio
 import hashlib
 import json
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import quote
 
@@ -17,10 +19,17 @@ from sqlalchemy.orm import selectinload
 
 from crm.config import GoogleSheetsTabConfig, Settings
 from crm.models import (
+    ApprovalDecision,
+    ApprovalStage,
+    MontageTask,
+    Publication,
+    PublisherStatus,
     Scenario,
+    ScenarioApproval,
     ScenarioContent,
     ScenarioResearch,
     ScenarioStatus,
+    SheetSource,
 )
 from crm.schemas import (
     GoogleSheetsRowAction,
@@ -59,6 +68,42 @@ SAFE_IMPORT_FIELDS = (
     "content.visual_notes",
     "content.score_recommendations",
     "content.ai_review",
+    "approval.responsible_review.decision",
+    "approval.responsible_review.comment",
+    "approval.pre_generation_client.decision",
+    "approval.pre_generation_client.comment",
+    "approval.source_material.decision",
+    "approval.source_material.comment",
+    "approval.montage_compliance.decision",
+    "approval.montage_compliance.comment",
+    "approval.final_client.decision",
+    "approval.final_client.comment",
+    "montage.source_material_url",
+    "montage.client_brand_style",
+    "montage.extra_brief",
+    "montage.external_editor_name",
+    "montage.price",
+    "montage.material_status",
+    "montage.scenarist_material_comment",
+    "montage.ready_material_url",
+    "montage.ready_at",
+    "montage.bot_visual_analysis",
+    "montage.compliance_analysis",
+    "montage.ai_analysis",
+    "montage.scenarist_revision_status",
+    "montage.scenarist_revision_comment",
+    "publication.publication_date",
+    "publication.publisher_brief",
+    "publication.description_dzen",
+    "publication.description_youtube",
+    "publication.description_tiktok",
+    "publication.description_instagram",
+    "publication.is_published",
+    "publication.instagram_url",
+    "publication.engagement_metrics",
+    "publication.publication_analysis",
+    "publication.ai_social_descriptions",
+    "publication.leia_script",
 )
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -104,10 +149,53 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "общий балл рекомендации",
     ),
     "content.ai_review": ("ии на этапе проверки", "ии проверка сценария"),
+    "approval.responsible_review.decision": ("одобрение ответственного",),
+    "approval.responsible_review.comment": ("комментарий ответственного",),
+    "approval.pre_generation_client.decision": ("одобрение сценария клиентом",),
+    "approval.pre_generation_client.comment": ("комментарий клиента",),
+    "approval.source_material.decision": ("одобрение исходника",),
+    "approval.source_material.comment": ("комментарий к исходнику",),
+    "approval.montage_compliance.decision": ("проверка монтажа по тз",),
+    "approval.montage_compliance.comment": ("комментарий менеджера",),
+    "approval.final_client.decision": ("одобрение готового клиентом",),
+    "approval.final_client.comment": ("комментарий клиента к монтажу",),
+    "montage.source_material_url": ("исходник и обложка",),
+    "montage.client_brand_style": ("фирменный стиль",),
+    "montage.extra_brief": ("дополнительное тз",),
+    "montage.external_editor_name": ("монтажёр", "монтажер"),
+    "montage.price": ("цена монтажа",),
+    "montage.material_status": ("статус материала", "статус материалов"),
+    "montage.scenarist_material_comment": ("комментарий сценариста к материалам",),
+    "montage.ready_material_url": ("готовый материал",),
+    "montage.ready_at": ("дата готового монтажа",),
+    "montage.bot_visual_analysis": ("раскладка бота анализатора",),
+    "montage.compliance_analysis": ("анализ соответствия",),
+    "montage.ai_analysis": ("ии анализ монтажа",),
+    "montage.scenarist_revision_status": ("исправление сценариста",),
+    "montage.scenarist_revision_comment": ("комментарий сценариста к исправлению",),
+    "publication.publication_date": ("дата публикации",),
+    "publication.publisher_brief": ("тз для публициста",),
+    "publication.description_dzen": ("описание dzen", "описание дзен"),
+    "publication.description_youtube": ("описание youtube",),
+    "publication.description_tiktok": ("описание tiktok",),
+    "publication.description_instagram": ("описание instagram",),
+    "publication.is_published": ("опубликовано",),
+    "publication.instagram_url": ("ссылка instagram",),
+    "publication.engagement_metrics": ("лайки просмотры",),
+    "publication.publication_analysis": ("анализ публикации",),
+    "publication.ai_social_descriptions": ("ии описания сетей",),
+    "publication.leia_script": ("сценарий от леи",),
 }
 
-DATE_FIELDS = {"scenario_date", "deadline"}
+DATE_FIELDS = {"scenario_date", "deadline", "montage.ready_at", "publication.publication_date"}
 INTEGER_FIELDS = {"score"}
+DECIMAL_FIELDS = {"montage.price"}
+BOOLEAN_FIELDS = {"publication.is_published"}
+APPROVAL_DECISION_FIELDS = {
+    field_name
+    for field_name in SAFE_IMPORT_FIELDS
+    if field_name.startswith("approval.") and field_name.endswith(".decision")
+}
 SCENARIO_FIELDS = {
     "scenario_date",
     "deadline",
@@ -133,6 +221,8 @@ class ParsedSheetRow:
     payload: dict[str, Any] | None
     checksum: str | None
     title: str | None
+    crm_row_id: uuid.UUID | None = None
+    source_payload: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
@@ -187,6 +277,15 @@ def _column_index(
             return None, f"{field_name}: configured column {override} is outside the header"
         return override - 1, None
     if isinstance(override, str):
+        column_reference = override.strip().upper()
+        if re.fullmatch(r"[A-Z]{1,3}", column_reference):
+            column_index = _column_number(column_reference) - 1
+            if column_index >= len(normalized_headers):
+                return (
+                    None,
+                    f"{field_name}: configured column {column_reference} is outside the header",
+                )
+            return column_index, None
         requested = normalize_header(override)
         matches = [index for index, header in enumerate(normalized_headers) if header == requested]
         if len(matches) == 1:
@@ -292,11 +391,56 @@ def parse_integer(value: Any) -> int | None:
     return int(normalized)
 
 
+def parse_decimal(value: Any) -> Decimal | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return Decimal(str(value).strip().replace(" ", "").replace(",", "."))
+    except InvalidOperation as error:
+        raise ValueError("expected a decimal number") from error
+
+
+def parse_boolean(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = str(value or "").strip().casefold()
+    if normalized in {"true", "1", "да", "yes", "опубликовано"}:
+        return True
+    if normalized in {"", "false", "0", "нет", "no", "не опубликовано"}:
+        return False
+    raise ValueError("expected TRUE/FALSE")
+
+
+def parse_approval_decision(value: Any) -> ApprovalDecision:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip().casefold())
+    if not normalized or normalized in {"ожидает", "ожидание", "pending"}:
+        return ApprovalDecision.PENDING
+    if normalized in {"одобрено", "одобрен", "approved", "готово"}:
+        return ApprovalDecision.APPROVED
+    if normalized in {
+        "доработать",
+        "доработка",
+        "на доработку",
+        "revision",
+        "исправить",
+    }:
+        return ApprovalDecision.REVISION
+    if normalized in {"отказ", "отказано", "отклонено", "rejected"}:
+        return ApprovalDecision.REJECTED
+    raise ValueError("expected Ожидает, Одобрено, Доработать or Отказ")
+
+
 def coerce_value(field_name: str, value: Any) -> Any:
     if field_name in DATE_FIELDS:
         return parse_date(value)
     if field_name in INTEGER_FIELDS:
         return parse_integer(value)
+    if field_name in DECIMAL_FIELDS:
+        return parse_decimal(value)
+    if field_name in BOOLEAN_FIELDS:
+        return parse_boolean(value)
+    if field_name in APPROVAL_DECISION_FIELDS:
+        return parse_approval_decision(value)
     if value is None:
         return None
     normalized = str(value).strip()
@@ -305,20 +449,45 @@ def coerce_value(field_name: str, value: Any) -> Any:
 
 def _nested_payload(mapped: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {}
-    research: dict[str, Any] = {}
-    content: dict[str, Any] = {}
     for field_name, value in mapped.items():
-        if field_name.startswith("research."):
-            research[field_name.split(".", 1)[1]] = value
-        elif field_name.startswith("content."):
-            content[field_name.split(".", 1)[1]] = value
-        else:
+        parts = field_name.split(".")
+        if len(parts) == 1:
             payload[field_name] = value
-    if research:
-        payload["research"] = research
-    if content:
-        payload["content"] = content
+            continue
+        target = payload
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = value
     return payload
+
+
+def _column_letters(index: int) -> str:
+    result = ""
+    value = index
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
+
+
+def _source_payload(headers: list[Any], row: list[Any]) -> dict[str, Any]:
+    return {
+        _column_letters(index + 1): {
+            "header": str(headers[index]).strip() if index < len(headers) else "",
+            "value": value,
+        }
+        for index, value in enumerate(row)
+        if str(value).strip()
+    }
+
+
+def _column_number(reference: str) -> int:
+    value = 0
+    for character in reference.strip().upper():
+        if not "A" <= character <= "Z":
+            raise ValueError("invalid column letters")
+        value = value * 26 + ord(character) - 64
+    return value
 
 
 def parse_sheet_values(
@@ -326,6 +495,7 @@ def parse_sheet_values(
     config: GoogleSheetsTabConfig,
     spreadsheet_id: str,
     max_rows: int,
+    crm_row_id_column: str | None = None,
 ) -> SheetSnapshot:
     if not values:
         raise GoogleSheetsSourceError("The configured header row is empty")
@@ -348,8 +518,18 @@ def parse_sheet_values(
         row_number = config.header_row + offset
         if not any(str(value).strip() for value in row):
             continue
+        source_payload = _source_payload(headers, row)
         mapped: dict[str, Any] = {}
         errors: list[str] = []
+        crm_row_id = None
+        if crm_row_id_column:
+            identity_index = _column_number(crm_row_id_column) - 1
+            identity_value = row[identity_index] if identity_index < len(row) else None
+            if str(identity_value or "").strip():
+                try:
+                    crm_row_id = uuid.UUID(str(identity_value).strip())
+                except ValueError:
+                    errors.append("crm_row_id: expected UUID in protected identity column")
         for field_name, column_index in resolved.items():
             raw_value = row[column_index] if column_index < len(row) else None
             try:
@@ -363,6 +543,11 @@ def parse_sheet_values(
         validated_payload: dict[str, Any] | None = None
         title = None
         try:
+            workflow_payload = {
+                key: nested.pop(key)
+                for key in ("approval", "montage", "publication")
+                if key in nested
+            }
             validated = ScenarioCreate(
                 project_id=config.project_id,
                 assigned_scenarist_id=config.assigned_scenarist_id,
@@ -373,6 +558,7 @@ def parse_sheet_values(
                 exclude_unset=True,
                 exclude={"project_id", "assigned_scenarist_id"},
             )
+            candidate_payload.update(workflow_payload)
             if not errors:
                 validated_payload = candidate_payload
                 content = candidate_payload.get("content") or {}
@@ -396,6 +582,8 @@ def parse_sheet_values(
                         else None
                     ),
                     "payload": validated_payload,
+                    "crm_row_id": str(crm_row_id) if crm_row_id else None,
+                    "source_payload": source_payload,
                 }
             )
             if validated_payload is not None
@@ -407,6 +595,8 @@ def parse_sheet_values(
                 payload=validated_payload,
                 checksum=checksum,
                 title=title,
+                crm_row_id=crm_row_id,
+                source_payload=source_payload,
                 errors=errors,
             )
         )
@@ -450,6 +640,7 @@ async def plan_rows(
     tab: str,
     *,
     for_update: bool = False,
+    source: SheetSource | None = None,
 ) -> list[PlannedRow]:
     query = (
         select(Scenario)
@@ -471,16 +662,23 @@ async def plan_rows(
         query = query.with_for_update()
     existing_rows = list((await session.scalars(query)).all())
     existing_by_row: dict[int, Scenario] = {}
+    existing_by_identity: dict[uuid.UUID, Scenario] = {}
     duplicate_rows: set[int] = set()
     for scenario in existing_rows:
         if scenario.source_row in existing_by_row:
             duplicate_rows.add(scenario.source_row)
         else:
             existing_by_row[scenario.source_row] = scenario
+        if scenario.crm_row_id is not None:
+            existing_by_identity[scenario.crm_row_id] = scenario
 
     planned: list[PlannedRow] = []
     for parsed in snapshot.rows:
-        existing = existing_by_row.get(parsed.row_number)
+        existing = (
+            existing_by_identity.get(parsed.crm_row_id)
+            if parsed.crm_row_id is not None
+            else None
+        ) or existing_by_row.get(parsed.row_number)
         if parsed.row_number in duplicate_rows:
             parsed.errors.append("Duplicate source identity already exists in CRM")
         if parsed.errors:
@@ -496,17 +694,6 @@ async def plan_rows(
                 PlannedRow(
                     parsed=parsed,
                     action=GoogleSheetsRowAction.SKIPPED,
-                    existing=existing,
-                )
-            )
-        elif workflow_is_locked(existing):
-            parsed.errors.append(
-                "CRM workflow has started; source updates are locked for this row"
-            )
-            planned.append(
-                PlannedRow(
-                    parsed=parsed,
-                    action=GoogleSheetsRowAction.ERROR,
                     existing=existing,
                 )
             )
@@ -540,11 +727,112 @@ def _set_nested_values(target: Any, values: dict[str, Any]) -> None:
         setattr(target, key, value)
 
 
+def _approval_values(payload: dict[str, Any]) -> dict[ApprovalStage, dict[str, Any]]:
+    raw = payload.get("approval") or {}
+    return {
+        stage: raw.get(stage.value) or {}
+        for stage in ApprovalStage
+        if raw.get(stage.value)
+    }
+
+
+def _apply_approvals(
+    scenario: Scenario,
+    values: dict[ApprovalStage, dict[str, Any]],
+) -> None:
+    existing = {approval.stage: approval for approval in scenario.approvals}
+    for stage, stage_values in values.items():
+        approval = existing.get(stage)
+        if approval is None:
+            approval = ScenarioApproval(stage=stage)
+            scenario.approvals.append(approval)
+        if "decision" in stage_values:
+            approval.decision = stage_values["decision"]
+        if "comment" in stage_values:
+            approval.comment = stage_values["comment"]
+        approval.decided_by_id = None
+        approval.decided_at = None
+
+
+def _decision(
+    scenario: Scenario,
+    stage: ApprovalStage,
+) -> ApprovalDecision:
+    approval = next(
+        (item for item in scenario.approvals if item.stage == stage),
+        None,
+    )
+    return approval.decision if approval else ApprovalDecision.PENDING
+
+
+def _derive_status(
+    scenario: Scenario,
+) -> ScenarioStatus:
+    if scenario.publication and scenario.publication.is_published:
+        return ScenarioStatus.PUBLISHED
+    final = _decision(scenario, ApprovalStage.FINAL_CLIENT)
+    if final == ApprovalDecision.APPROVED:
+        return ScenarioStatus.APPROVED
+    if final in {ApprovalDecision.REVISION, ApprovalDecision.REJECTED}:
+        return ScenarioStatus.MANAGER_REVISION_REVIEW
+    compliance = _decision(scenario, ApprovalStage.MONTAGE_COMPLIANCE)
+    if compliance == ApprovalDecision.APPROVED:
+        return ScenarioStatus.CLIENT_REVIEW
+    if compliance in {ApprovalDecision.REVISION, ApprovalDecision.REJECTED}:
+        return ScenarioStatus.EDITING
+    if scenario.montage and scenario.montage.ready_material_url:
+        return ScenarioStatus.EDITING
+    source = _decision(scenario, ApprovalStage.SOURCE_MATERIAL)
+    if source == ApprovalDecision.APPROVED:
+        if scenario.montage and (
+            scenario.montage.assigned_editor_id or scenario.montage.external_editor_name
+        ):
+            return ScenarioStatus.HANDED_TO_EDITOR
+        return ScenarioStatus.SENT_TO_GENERATION
+    if source in {ApprovalDecision.REVISION, ApprovalDecision.REJECTED}:
+        return ScenarioStatus.SENT_TO_GENERATION
+    client = _decision(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
+    if client == ApprovalDecision.APPROVED:
+        return ScenarioStatus.SENT_TO_GENERATION
+    if client in {ApprovalDecision.REVISION, ApprovalDecision.REJECTED}:
+        return ScenarioStatus.REVISION
+    responsible = _decision(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+    if responsible == ApprovalDecision.APPROVED:
+        return ScenarioStatus.CLIENT_REVIEW
+    if responsible in {ApprovalDecision.REVISION, ApprovalDecision.REJECTED}:
+        return ScenarioStatus.REVISION
+    if scenario.content and scenario.content.script_text:
+        return ScenarioStatus.IN_REVIEW
+    return ScenarioStatus.DRAFT
+
+
+def _apply_workflow_values(scenario: Scenario, payload: dict[str, Any]) -> None:
+    approvals = _approval_values(payload)
+    montage_values = payload.get("montage") or {}
+    publication_values = payload.get("publication") or {}
+    _apply_approvals(scenario, approvals)
+    if montage_values:
+        if scenario.montage is None:
+            scenario.montage = MontageTask()
+        _set_nested_values(scenario.montage, montage_values)
+    if publication_values:
+        if scenario.publication is None:
+            scenario.publication = Publication()
+        _set_nested_values(scenario.publication, publication_values)
+        scenario.publication.publisher_status = (
+            PublisherStatus.PUBLISHED
+            if scenario.publication.is_published
+            else PublisherStatus.PENDING
+        )
+    scenario.status = _derive_status(scenario)
+
+
 async def apply_planned_rows(
     session: AsyncSession,
     planned: list[PlannedRow],
     spreadsheet_id: str,
     config: GoogleSheetsTabConfig,
+    source: SheetSource | None = None,
 ) -> list[GoogleSheetsRowResult]:
     for item in planned:
         if item.action in {GoogleSheetsRowAction.ERROR, GoogleSheetsRowAction.SKIPPED}:
@@ -563,17 +851,17 @@ async def apply_planned_rows(
                 source_tab=config.tab,
                 source_row=item.parsed.row_number,
                 source_checksum=item.parsed.checksum,
-                status=(
-                    ScenarioStatus.IN_REVIEW
-                    if content_values.get("script_text")
-                    else ScenarioStatus.DRAFT
-                ),
+                source_payload=item.parsed.source_payload,
+                sheet_source_id=source.id if source else None,
+                crm_row_id=item.parsed.crm_row_id or uuid.uuid4(),
+                status=ScenarioStatus.DRAFT,
                 **scenario_values,
             )
             if research_values:
                 scenario.research = ScenarioResearch(**research_values)
             if content_values:
                 scenario.content = ScenarioContent(**content_values)
+            _apply_workflow_values(scenario, payload)
             session.add(scenario)
             item.existing = scenario
         else:
@@ -581,6 +869,11 @@ async def apply_planned_rows(
             scenario.project_id = config.project_id
             scenario.assigned_scenarist_id = config.assigned_scenarist_id
             scenario.source_checksum = item.parsed.checksum
+            scenario.source_payload = item.parsed.source_payload
+            if source:
+                scenario.sheet_source_id = source.id
+            if item.parsed.crm_row_id:
+                scenario.crm_row_id = item.parsed.crm_row_id
             _set_nested_values(scenario, scenario_values)
             if research_values:
                 if scenario.research is None:
@@ -590,12 +883,7 @@ async def apply_planned_rows(
                 if scenario.content is None:
                     scenario.content = ScenarioContent()
                 _set_nested_values(scenario.content, content_values)
-                if "script_text" in content_values:
-                    scenario.status = (
-                        ScenarioStatus.IN_REVIEW
-                        if content_values["script_text"]
-                        else ScenarioStatus.DRAFT
-                    )
+            _apply_workflow_values(scenario, payload)
     await session.flush()
     return [item.result() for item in planned]
 

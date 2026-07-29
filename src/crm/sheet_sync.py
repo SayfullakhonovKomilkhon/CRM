@@ -20,6 +20,8 @@ from crm.google_sheets import (
     SCENARIO_FIELDS,
     GoogleSheetsClient,
     GoogleSheetsSourceError,
+    _apply_workflow_values,
+    _nested_payload,
     canonical_checksum,
     coerce_value,
     workflow_is_locked,
@@ -247,6 +249,7 @@ def _set_values(scenario: Scenario, changed_fields: dict[str, Any]) -> None:
     scenario_values: dict[str, Any] = {}
     research_values: dict[str, Any] = {}
     content_values: dict[str, Any] = {}
+    workflow_values: dict[str, Any] = {}
     for field_name, raw_value in changed_fields.items():
         value = coerce_value(field_name, raw_value)
         if field_name in SCENARIO_FIELDS:
@@ -255,6 +258,8 @@ def _set_values(scenario: Scenario, changed_fields: dict[str, Any]) -> None:
             research_values[field_name.split(".", 1)[1]] = value
         elif field_name.startswith("content."):
             content_values[field_name.split(".", 1)[1]] = value
+        else:
+            workflow_values[field_name] = value
     validated = ScenarioCreate(
         project_id=scenario.project_id,
         assigned_scenarist_id=scenario.assigned_scenarist_id,
@@ -286,6 +291,8 @@ def _set_values(scenario: Scenario, changed_fields: dict[str, Any]) -> None:
                 if content_values["script_text"]
                 else ScenarioStatus.DRAFT
             )
+    if workflow_values:
+        _apply_workflow_values(scenario, _nested_payload(workflow_values))
 
 
 def active_scenarist_revision_stage(scenario: Scenario) -> ApprovalStage | None:
@@ -306,6 +313,13 @@ def active_scenarist_revision_stage(scenario: Scenario) -> ApprovalStage | None:
 
 def inbound_update_allowed(scenario: Scenario) -> bool:
     return not workflow_is_locked(scenario) or active_scenarist_revision_stage(scenario) is not None
+
+
+def workflow_fields_only(changed_fields: dict[str, Any]) -> bool:
+    return bool(changed_fields) and all(
+        field_name.startswith(("approval.", "montage.", "publication."))
+        for field_name in changed_fields
+    )
 
 
 def finalize_inbound_revision(
@@ -382,7 +396,11 @@ async def process_inbound_event(
     revision_stage = (
         active_scenarist_revision_stage(scenario) if scenario is not None else None
     )
-    if scenario is not None and not inbound_update_allowed(scenario):
+    if (
+        scenario is not None
+        and not inbound_update_allowed(scenario)
+        and not workflow_fields_only(event.changed_fields)
+    ):
         event.status = SheetEventStatus.FAILED
         event.error = "CRM workflow has started; inbound source updates are locked"
         return event
@@ -405,6 +423,12 @@ async def process_inbound_event(
         scenario.source_checksum = event.checksum
     try:
         _set_values(scenario, event.changed_fields)
+        source_payload = dict(scenario.source_payload or {})
+        mapped_fields = dict(source_payload.get("mapped_fields") or {})
+        mapped_fields.update(event.changed_fields)
+        source_payload["mapped_fields"] = mapped_fields
+        source_payload["last_event_raw"] = event.raw
+        scenario.source_payload = source_payload
     except (ValueError, ValidationError) as error:
         if scenario_was_new:
             session.expunge(scenario)
