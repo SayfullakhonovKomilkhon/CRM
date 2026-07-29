@@ -100,7 +100,7 @@ def test_parse_sheet_values_returns_stable_row_identity_and_validated_payload():
     assert len(first.rows) == 1
     row = first.rows[0]
     assert row.row_number == 3
-    assert row.payload["scenario_date"] == "2026-07-24"
+    assert row.payload["scenario_date"] == date(2026, 7, 24)
     assert row.payload["score"] == 87
     assert row.payload["content"]["script_text"] == "Тестовый сценарий"
     assert row.title == "Обложка"

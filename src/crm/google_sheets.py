@@ -369,7 +369,7 @@ def parse_sheet_values(
                 **nested,
             )
             candidate_payload = validated.model_dump(
-                mode="json",
+                mode="python",
                 exclude_unset=True,
                 exclude={"project_id", "assigned_scenarist_id"},
             )
