@@ -57,6 +57,7 @@ def test_settings_reject_duplicate_tabs_case_insensitively():
 
 def test_parse_date_accepts_day_and_month_using_current_year():
     assert parse_date("25.05") == date(date.today().year, 5, 25)
+    assert parse_date("21.04.") == date(date.today().year, 4, 21)
     assert parse_date("27/05") == date(date.today().year, 5, 27)
 
 

@@ -365,7 +365,7 @@ def parse_date(value: Any) -> date | None:
             return datetime.strptime(normalized, date_format).date()
         except ValueError:
             continue
-    for date_format in ("%d.%m", "%d/%m"):
+    for date_format in ("%d.%m", "%d.%m.", "%d/%m"):
         try:
             return datetime.strptime(normalized, date_format).date().replace(
                 year=date.today().year
