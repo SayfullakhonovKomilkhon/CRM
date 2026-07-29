@@ -368,6 +368,9 @@ async def process_inbound_event(
             selectinload(Scenario.research),
             selectinload(Scenario.content),
             selectinload(Scenario.approvals),
+            selectinload(Scenario.montage),
+            selectinload(Scenario.publication),
+            selectinload(Scenario.final_revision_gate),
         )
         .with_for_update()
     )

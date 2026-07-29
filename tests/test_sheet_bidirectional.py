@@ -115,7 +115,14 @@ def test_inbound_values_use_scenario_validation_before_mutation():
 
 def test_inbound_update_eager_loads_mutable_scenario_relationships():
     source = inspect.getsource(process_inbound_event)
-    for relationship in ("research", "content", "approvals"):
+    for relationship in (
+        "research",
+        "content",
+        "approvals",
+        "montage",
+        "publication",
+        "final_revision_gate",
+    ):
         assert f"selectinload(Scenario.{relationship})" in source
 
 
