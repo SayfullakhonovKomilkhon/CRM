@@ -20,6 +20,7 @@ from crm.models import (
     SheetWritebackStatus,
 )
 from crm.routers import scenarios as scenario_routes
+from crm.schemas import ScenarioCreate
 from crm.sheet_sync import (
     WRITEBACK_FIELDS,
     _set_values,
@@ -258,6 +259,25 @@ def test_new_sheet_row_places_fields_and_identity_in_sparse_columns():
     assert values[1] == "124"
     assert values[19] == "Новый сценарий"
     assert values[78] == str(row_id)
+
+
+def test_create_writeback_is_built_from_payload_without_lazy_relationship_reads():
+    payload = ScenarioCreate(
+        project_id=uuid.uuid4(),
+        scenario_type="Экспертный",
+        content={
+            "cover_text": "Новая строка",
+            "script_text": "Полный текст",
+        },
+    )
+
+    values = scenario_routes.scenario_create_writeback(payload, "124")
+
+    assert values["external_id"] == "124"
+    assert values["scenario_type"] == "Экспертный"
+    assert values["content.cover_text"] == "Новая строка"
+    assert values["content.script_text"] == "Полный текст"
+    assert "deadline" not in values
 
 
 class FakeSession:

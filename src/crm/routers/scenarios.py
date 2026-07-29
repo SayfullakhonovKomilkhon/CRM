@@ -831,6 +831,40 @@ async def list_scenario_sheet(
     )
 
 
+def scenario_create_writeback(
+    payload: ScenarioCreate,
+    external_id: str,
+) -> dict[str, object]:
+    values: dict[str, object | None] = {
+        "external_id": external_id,
+        "scenario_date": payload.scenario_date,
+        "deadline": payload.deadline,
+        "score": payload.score,
+        "scenario_type": payload.scenario_type,
+        "visual_format": payload.visual_format,
+        "speaker": payload.speaker,
+    }
+    if payload.research:
+        values.update(
+            {
+                f"research.{field_name}": value
+                for field_name, value in payload.research.model_dump().items()
+            }
+        )
+    if payload.content:
+        values.update(
+            {
+                f"content.{field_name}": value
+                for field_name, value in payload.content.model_dump().items()
+            }
+        )
+    return {
+        field_name: value
+        for field_name, value in values.items()
+        if value is not None
+    }
+
+
 @router.post("", response_model=ScenarioRead, status_code=status.HTTP_201_CREATED)
 async def create_scenario(
     payload: ScenarioCreate,
@@ -900,61 +934,10 @@ async def create_scenario(
     session.add(scenario)
     try:
         await session.flush()
-        create_writeback: dict[str, object] = {
-            "external_id": scenario.external_id,
-            "scenario_date": scenario.scenario_date,
-            "deadline": scenario.deadline,
-            "score": scenario.score,
-            "scenario_type": scenario.scenario_type,
-            "visual_format": scenario.visual_format,
-            "speaker": scenario.speaker,
-        }
-        if scenario.research:
-            create_writeback.update(
-                {
-                    f"research.{field_name}": getattr(scenario.research, field_name)
-                    for field_name in (
-                        "competitor_url",
-                        "competitor_category",
-                        "full_analysis",
-                        "performance_metrics",
-                        "transcription",
-                        "timeline",
-                        "why_viral",
-                        "takeaways",
-                        "improvements",
-                        "replication_template",
-                        "ai_analysis",
-                    )
-                }
-            )
-        if scenario.content:
-            create_writeback.update(
-                {
-                    f"content.{field_name}": getattr(scenario.content, field_name)
-                    for field_name in (
-                        "claude_context",
-                        "cover_text",
-                        "script_text",
-                        "montage_brief",
-                        "scenarist_comment",
-                        "hook",
-                        "retention",
-                        "call_to_action",
-                        "visual_notes",
-                        "score_recommendations",
-                        "ai_review",
-                    )
-                }
-            )
         await enqueue_sheet_writeback(
             session,
             scenario,
-            {
-                field_name: value
-                for field_name, value in create_writeback.items()
-                if value is not None
-            },
+            scenario_create_writeback(payload, scenario.external_id),
         )
         await session.commit()
     except IntegrityError as error:
