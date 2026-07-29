@@ -59,6 +59,9 @@ def test_postgresql_migration_renumbers_deterministically_before_sequence_defaul
     calls = []
 
     class Recorder:
+        def get_bind(self):
+            return object()
+
         def drop_constraint(self, *args, **kwargs):
             calls.append(("drop_constraint", args, kwargs))
 
@@ -71,7 +74,12 @@ def test_postgresql_migration_renumbers_deterministically_before_sequence_defaul
         def create_unique_constraint(self, *args, **kwargs):
             calls.append(("create_unique_constraint", args, kwargs))
 
+    class Inspector:
+        def get_unique_constraints(self, _table):
+            return [{"name": "uq_scenario_project_external_id"}]
+
     namespace["upgrade"].__globals__["op"] = Recorder()
+    namespace["upgrade"].__globals__["sa"].inspect = lambda _bind: Inspector()
     namespace["upgrade"]()
 
     executed_sql = "\n".join(call[1] for call in calls if call[0] == "execute")

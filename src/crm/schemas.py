@@ -574,6 +574,16 @@ class ScenarioSortBy(StrEnum):
     CREATED_AT = "created_at"
 
 
+class ScenarioQueue(StrEnum):
+    SCENARIO_MANAGER_REVIEW = "scenario_manager_review"
+    EDITOR_MANAGER_INTAKE = "editor_manager_intake"
+    EDITOR_MANAGER_INWORK = "editor_manager_inwork"
+    EDITOR_MANAGER_CHECK = "editor_manager_check"
+    EDITOR_MANAGER_REWORK_REVIEW = "editor_manager_rework_review"
+    PUBLISHER_MANAGER_QUEUE = "publisher_manager_queue"
+    PUBLISHER_MANAGER_INWORK = "publisher_manager_inwork"
+
+
 class SortOrder(StrEnum):
     ASC = "asc"
     DESC = "desc"

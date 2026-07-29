@@ -7,7 +7,13 @@ from crm.models import Client, Project, Role, User
 from crm.security import hash_password
 
 DEMO_USERS = [
-    ("manager@crm.local", "Менеджер", Role.MANAGER),
+    ("manager@crm.local", "Менеджер сценаристов", Role.MANAGER),
+    ("editor-manager@crm.local", "Менеджер монтажёров", Role.EDITOR_MANAGER),
+    (
+        "publisher-manager@crm.local",
+        "Менеджер публицистов",
+        Role.PUBLISHER_MANAGER,
+    ),
     ("scenarist@crm.local", "Сценарист", Role.SCENARIST),
     ("editor@crm.local", "Монтажёр", Role.EDITOR),
     ("client@crm.local", "Клиент", Role.CLIENT),

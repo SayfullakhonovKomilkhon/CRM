@@ -6,7 +6,11 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from crm.models import Role
-from crm.routers.catalog import ensure_active_manager_remains, resolve_user_client_id
+from crm.routers.catalog import (
+    ensure_active_manager_remains,
+    require_catalog_reader,
+    resolve_user_client_id,
+)
 from crm.schemas import ClientUpdate, ProjectUpdate, UserAdminCreate, UserAdminUpdate
 
 
@@ -131,3 +135,38 @@ def test_last_active_manager_cannot_be_deactivated_or_demoted() -> None:
         False,
         active_manager_count=1,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "role",
+    [
+        Role.MANAGER,
+        Role.EDITOR_MANAGER,
+        Role.PUBLISHER_MANAGER,
+        Role.SCENARIST,
+        Role.CLIENT,
+    ],
+)
+async def test_catalog_reader_allows_manager_scenarist_and_client(role: Role) -> None:
+    actor = user(role)
+    assert await require_catalog_reader(actor) is actor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", [Role.EDITOR, Role.PUBLISHER])
+async def test_catalog_reader_rejects_editor_and_publisher(role: Role) -> None:
+    with pytest.raises(HTTPException) as error:
+        await require_catalog_reader(user(role))
+    assert error.value.status_code == 403
+
+
+def test_admin_payload_accepts_both_specialized_manager_roles() -> None:
+    for role in (Role.EDITOR_MANAGER, Role.PUBLISHER_MANAGER):
+        payload = UserAdminCreate(
+            email=f"{role.value}@example.com",
+            full_name=role.value,
+            role=role,
+            password="password8",
+        )
+        assert payload.role == role

@@ -6,7 +6,6 @@ from crm.models import (
     GateDecision,
     PublicationReviewDecision,
     Role,
-    ScenarioStatus,
 )
 from crm.schemas import (
     EditorStatus,
@@ -31,7 +30,16 @@ class SheetFieldSpec:
 
 
 ALL_ROLES = frozenset(Role)
-INTERNAL_ROLES = frozenset({Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER})
+INTERNAL_ROLES = frozenset(
+    {
+        Role.MANAGER,
+        Role.EDITOR_MANAGER,
+        Role.PUBLISHER_MANAGER,
+        Role.SCENARIST,
+        Role.EDITOR,
+        Role.PUBLISHER,
+    }
+)
 PRODUCTION_ROLES = INTERNAL_ROLES
 
 
@@ -535,6 +543,84 @@ def values_for_role(scenario: ScenarioRead, role: Role) -> dict[str, object]:
     return values
 
 
+SCENARIST_SCENARIO_FIELDS = {
+    "scenario_date",
+    "speaker",
+    "deadline",
+    "scenario_type",
+    "visual_format",
+    "score",
+    "research.competitor_url",
+    "research.competitor_category",
+    "research.full_analysis",
+    "research.performance_metrics",
+    "research.transcription",
+    "research.timeline",
+    "research.why_viral",
+    "research.takeaways",
+    "research.improvements",
+    "research.replication_template",
+    "research.ai_analysis",
+    "content.claude_context",
+    "content.cover_text",
+    "content.script_text",
+    "content.montage_brief",
+    "content.scenarist_comment",
+    "content.hook",
+    "content.retention",
+    "content.call_to_action",
+    "content.visual_notes",
+    "content.score_recommendations",
+    "content.ai_review",
+}
+SCENARIST_SOURCE_FIELDS = {
+    "montage.source_material_url",
+    "montage.client_brand_style",
+    "montage.extra_brief",
+    "montage.material_status",
+    "montage.scenarist_material_comment",
+    "montage.scenarist_revision_status",
+    "montage.scenarist_revision_comment",
+}
+SCENARIST_PUBLICATION_FIELDS = {
+    "publication.publisher_brief",
+    "publication.description_dzen",
+    "publication.description_youtube",
+    "publication.description_tiktok",
+    "publication.description_instagram",
+    "publication.ai_social_descriptions",
+    "publication.leia_script",
+}
+EDITOR_MANAGER_MONTAGE_FIELDS = {
+    "montage.assigned_editor_id",
+    "montage.external_editor_name",
+    "montage.price",
+    "montage.payment_due_date",
+    "montage.ready_at",
+    "montage.brief_compliance_status",
+    "montage.bot_visual_analysis",
+    "montage.compliance_analysis",
+    "montage.ai_analysis",
+}
+PUBLISHER_MANAGER_CONTROL_FIELDS = {
+    "publication.engagement_metrics",
+    "publication.publication_analysis",
+}
+EDITOR_RESULT_FIELDS = {
+    "montage.ready_material_url",
+    "montage.editor_status",
+    "montage.editor_comment",
+}
+PUBLISHER_RESULT_FIELDS = {
+    "publication.publisher_status",
+    "publication.publisher_comment",
+    "publication.dzen_url",
+    "publication.youtube_url",
+    "publication.tiktok_url",
+    "publication.instagram_url",
+}
+
+
 def editable_fields_for_role(scenario: ScenarioRead, role: Role) -> list[str]:
     if role == Role.CLIENT:
         editable: set[str] = set()
@@ -545,75 +631,39 @@ def editable_fields_for_role(scenario: ScenarioRead, role: Role) -> list[str]:
                 editable.add("approval.pre_generation_client.note")
         return sorted(editable)
 
+    if role == Role.EDITOR:
+        if (
+            "montage" not in set(scenario.available_sections)
+            or getattr(scenario, "status", None) not in EDITOR_ACTION_STATUSES
+        ):
+            return []
+        return sorted(EDITOR_RESULT_FIELDS)
+
     if role == Role.PUBLISHER:
         publication = getattr(scenario, "publication", None)
         if (
+            "publication" not in set(scenario.available_sections)
+            or
             publication is None
             or publication.manager_review_decision != PublicationReviewDecision.APPROVED
         ):
             return []
-        return sorted(
-            {
-                "publication.publisher_status",
-                "publication.publisher_comment",
-                "publication.dzen_url",
-                "publication.youtube_url",
-                "publication.tiktok_url",
-                "publication.instagram_url",
-            }
-        )
+        return sorted(PUBLISHER_RESULT_FIELDS)
 
-    editable = set()
-    available_approval_stages = set(scenario.available_approval_stages)
     available_sections = set(scenario.available_sections)
-    for item in SHEET_FIELDS:
-        if item.editor == "readonly":
-            continue
-        if item.field == "assigned_scenarist_id" and role != Role.MANAGER:
-            continue
-        if item.field == "montage.assigned_editor_id" and role != Role.MANAGER:
-            continue
-        if item.field in {
-            "montage.ready_material_url",
-            "montage.editor_status",
-            "montage.editor_comment",
-        }:
-            if role != Role.EDITOR or getattr(
-                scenario, "status", ScenarioStatus.EDITING
-            ) not in EDITOR_ACTION_STATUSES:
-                continue
-        if item.field in {
-            "publication.publisher_status",
-            "publication.publisher_comment",
-            "publication.dzen_url",
-            "publication.youtube_url",
-            "publication.tiktok_url",
-            "publication.instagram_url",
-        }:
-            continue
-        if item.field in {
-            "final_revision_gate.decision",
-            "final_revision_gate.manager_comment",
-            "publication.assigned_publisher_id",
-            "publication.manager_review_decision",
-            "publication.manager_review_comment",
-        }:
-            continue
-        if item.field.startswith("approval."):
-            _, stage_value, _ = item.field.split(".")
-            stage = ApprovalStage(stage_value)
-            if (
-                stage not in available_approval_stages
-                or stage not in ROLE_APPROVAL_STAGES.get(role, set())
-            ):
-                continue
-        elif item.field.startswith("montage.") and "montage" not in available_sections:
-            continue
-        elif item.field.startswith("publication.") and "publication" not in available_sections:
-            continue
-        editable.add(item.field)
-
+    available_stages = set(scenario.available_approval_stages)
+    editable: set[str] = set()
     if role == Role.MANAGER:
+        editable.add("assigned_scenarist_id")
+    elif role == Role.SCENARIST:
+        editable.update(SCENARIST_SCENARIO_FIELDS)
+        if "montage" in available_sections:
+            editable.update(SCENARIST_SOURCE_FIELDS)
+        if "publication" in available_sections:
+            editable.update(SCENARIST_PUBLICATION_FIELDS)
+    elif role == Role.EDITOR_MANAGER:
+        if "montage" in available_sections:
+            editable.update(EDITOR_MANAGER_MONTAGE_FIELDS)
         gate = getattr(scenario, "final_revision_gate", None)
         if gate is not None and gate.decision == GateDecision.PENDING:
             editable.update(
@@ -622,7 +672,10 @@ def editable_fields_for_role(scenario: ScenarioRead, role: Role) -> list[str]:
                     "final_revision_gate.manager_comment",
                 }
             )
+    elif role == Role.PUBLISHER_MANAGER:
         publication = getattr(scenario, "publication", None)
+        if "publication" in available_sections:
+            editable.update(PUBLISHER_MANAGER_CONTROL_FIELDS)
         if (
             "publication" in available_sections
             and (
@@ -638,5 +691,9 @@ def editable_fields_for_role(scenario: ScenarioRead, role: Role) -> list[str]:
                     "publication.manager_review_comment",
                 }
             )
+
+    for stage in available_stages & ROLE_APPROVAL_STAGES.get(role, set()):
+        editable.add(f"approval.{stage.value}.decision")
+        editable.add(f"approval.{stage.value}.comment")
 
     return sorted(editable)

@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -63,6 +63,7 @@ from crm.schemas import (
     ScenarioCreate,
     ScenarioListItem,
     ScenarioPage,
+    ScenarioQueue,
     ScenarioRead,
     ScenarioSortBy,
     ScenarioUpdate,
@@ -77,7 +78,9 @@ from crm.schemas import (
 from crm.sheet import columns_for_role, editable_fields_for_role, values_for_role
 from crm.workflow import (
     EDITOR_ACTION_STATUSES,
+    EDITOR_MANAGER_VISIBLE_STATUSES,
     EDITOR_VISIBLE_STATUSES,
+    PUBLISHER_MANAGER_VISIBLE_STATUSES,
     PUBLISHER_VISIBLE_STATUSES,
     ROLE_APPROVAL_STAGES,
     approval_for,
@@ -114,6 +117,27 @@ REVISION_COMMENT_STAGES = {
     *CLIENT_APPROVAL_STAGES,
     ApprovalStage.SOURCE_MATERIAL,
     ApprovalStage.MONTAGE_COMPLIANCE,
+}
+
+SCENARIST_MONTAGE_FIELDS = {
+    "source_material_url",
+    "client_brand_style",
+    "extra_brief",
+    "material_status",
+    "scenarist_material_comment",
+    "scenarist_revision_status",
+    "scenarist_revision_comment",
+}
+EDITOR_MANAGER_MONTAGE_FIELDS = {
+    "assigned_editor_id",
+    "external_editor_name",
+    "price",
+    "payment_due_date",
+    "brief_compliance_status",
+    "ready_at",
+    "bot_visual_analysis",
+    "compliance_analysis",
+    "ai_analysis",
 }
 
 
@@ -189,6 +213,11 @@ def apply_final_revision_gate_decision(
     comment: str,
     manager: User,
 ) -> FinalClientRevisionGate:
+    if manager.role != Role.EDITOR_MANAGER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only editor manager can decide the final revision gate",
+        )
     gate = scenario.final_revision_gate
     final_approval = approval_for(scenario, ApprovalStage.FINAL_CLIENT)
     if gate is None or final_approval is None or final_approval.decision not in {
@@ -233,6 +262,11 @@ async def apply_publication_manager_review(
     assigned_publisher_id: uuid.UUID | None,
     manager: User,
 ) -> Publication:
+    if manager.role != Role.PUBLISHER_MANAGER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only publisher manager can review publication",
+        )
     if (
         scenario.publication is not None
         and scenario.publication.manager_review_decision
@@ -330,6 +364,8 @@ def apply_visibility(query, user: User):
             Scenario.montage.has(MontageTask.assigned_editor_id == user.id),
             Scenario.status.in_(EDITOR_VISIBLE_STATUSES),
         )
+    if user.role == Role.EDITOR_MANAGER:
+        return query.where(Scenario.status.in_(EDITOR_MANAGER_VISIBLE_STATUSES))
     if user.role == Role.CLIENT:
         return query.where(Scenario.project.has(Project.client_id == user.client_id))
     if user.role == Role.PUBLISHER:
@@ -337,7 +373,133 @@ def apply_visibility(query, user: User):
             Scenario.publication.has(Publication.assigned_publisher_id == user.id),
             Scenario.status.in_(PUBLISHER_VISIBLE_STATUSES),
         )
+    if user.role == Role.PUBLISHER_MANAGER:
+        return query.where(Scenario.status.in_(PUBLISHER_MANAGER_VISIBLE_STATUSES))
     return query
+
+
+QUEUE_ROLES = {
+    ScenarioQueue.SCENARIO_MANAGER_REVIEW: Role.MANAGER,
+    ScenarioQueue.EDITOR_MANAGER_INTAKE: Role.EDITOR_MANAGER,
+    ScenarioQueue.EDITOR_MANAGER_INWORK: Role.EDITOR_MANAGER,
+    ScenarioQueue.EDITOR_MANAGER_CHECK: Role.EDITOR_MANAGER,
+    ScenarioQueue.EDITOR_MANAGER_REWORK_REVIEW: Role.EDITOR_MANAGER,
+    ScenarioQueue.PUBLISHER_MANAGER_QUEUE: Role.PUBLISHER_MANAGER,
+    ScenarioQueue.PUBLISHER_MANAGER_INWORK: Role.PUBLISHER_MANAGER,
+}
+
+
+def _approval_pending(stage: ApprovalStage):
+    stage_exists = Scenario.approvals.any(ScenarioApproval.stage == stage)
+    pending = Scenario.approvals.any(
+        and_(
+            ScenarioApproval.stage == stage,
+            ScenarioApproval.decision == ApprovalDecision.PENDING,
+        )
+    )
+    return or_(~stage_exists, pending)
+
+
+def _approval_approved(stage: ApprovalStage):
+    return Scenario.approvals.any(
+        and_(
+            ScenarioApproval.stage == stage,
+            ScenarioApproval.decision == ApprovalDecision.APPROVED,
+        )
+    )
+
+
+def queue_filter(queue: ScenarioQueue, user: User):
+    required_role = QUEUE_ROLES[queue]
+    if user.role != required_role:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Queue {queue.value} is available only to {required_role.value}",
+        )
+
+    nonempty_script = Scenario.content.has(
+        func.nullif(ScenarioContent.script_text, "").is_not(None)
+    )
+    nonempty_source = Scenario.montage.has(
+        func.nullif(MontageTask.source_material_url, "").is_not(None)
+    )
+    nonempty_ready = Scenario.montage.has(
+        func.nullif(MontageTask.ready_material_url, "").is_not(None)
+    )
+    if queue == ScenarioQueue.SCENARIO_MANAGER_REVIEW:
+        return and_(
+            Scenario.status == ScenarioStatus.IN_REVIEW,
+            nonempty_script,
+            _approval_pending(ApprovalStage.RESPONSIBLE_REVIEW),
+        )
+    if queue == ScenarioQueue.EDITOR_MANAGER_INTAKE:
+        return and_(
+            Scenario.status == ScenarioStatus.SENT_TO_GENERATION,
+            _approval_approved(ApprovalStage.PRE_GENERATION_CLIENT),
+            nonempty_source,
+            _approval_pending(ApprovalStage.SOURCE_MATERIAL),
+        )
+    if queue == ScenarioQueue.EDITOR_MANAGER_INWORK:
+        return and_(
+            Scenario.status.in_(
+                {ScenarioStatus.HANDED_TO_EDITOR, ScenarioStatus.EDITING}
+            ),
+            Scenario.montage.has(MontageTask.assigned_editor_id.is_not(None)),
+            ~nonempty_ready,
+        )
+    if queue == ScenarioQueue.EDITOR_MANAGER_CHECK:
+        return and_(
+            Scenario.status == ScenarioStatus.EDITING,
+            nonempty_ready,
+            _approval_pending(ApprovalStage.MONTAGE_COMPLIANCE),
+        )
+    if queue == ScenarioQueue.EDITOR_MANAGER_REWORK_REVIEW:
+        pending_gate = Scenario.final_revision_gate.has(
+            FinalClientRevisionGate.decision == GateDecision.PENDING
+        )
+        resubmitted_montage = and_(
+            Scenario.status == ScenarioStatus.EDITING,
+            nonempty_ready,
+            Scenario.approvals.any(
+                and_(
+                    ScenarioApproval.stage == ApprovalStage.MONTAGE_COMPLIANCE,
+                    ScenarioApproval.decision == ApprovalDecision.PENDING,
+                    func.nullif(ScenarioApproval.comment, "").is_not(None),
+                )
+            ),
+        )
+        return or_(pending_gate, resubmitted_montage)
+    if queue == ScenarioQueue.PUBLISHER_MANAGER_QUEUE:
+        prepared_publication = Scenario.publication.has(
+            and_(
+                Publication.manager_review_decision
+                == PublicationReviewDecision.PENDING,
+                or_(
+                    func.nullif(Publication.description_dzen, "").is_not(None),
+                    func.nullif(Publication.description_youtube, "").is_not(None),
+                    func.nullif(Publication.description_tiktok, "").is_not(None),
+                    func.nullif(Publication.description_instagram, "").is_not(None),
+                ),
+            )
+        )
+        return and_(
+            Scenario.status == ScenarioStatus.APPROVED,
+            _approval_approved(ApprovalStage.FINAL_CLIENT),
+            prepared_publication,
+        )
+    return and_(
+        Scenario.status == ScenarioStatus.READY_TO_PUBLISH,
+        Scenario.publication.has(
+            and_(
+                Publication.manager_review_decision
+                == PublicationReviewDecision.APPROVED,
+                Publication.assigned_publisher_id.is_not(None),
+                Publication.publisher_status.in_(
+                    {PublisherStatus.ASSIGNED, PublisherStatus.IN_PROGRESS}
+                ),
+            )
+        ),
+    )
 
 
 async def get_visible_scenario(
@@ -373,7 +535,14 @@ def scenario_for_role(scenario: Scenario, user: User) -> ScenarioRead:
         available_sections.append("montage")
     if publication_section_available(scenario):
         available_sections.append("publication")
-    if user.role in {Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER}:
+    if user.role in {
+        Role.MANAGER,
+        Role.EDITOR_MANAGER,
+        Role.PUBLISHER_MANAGER,
+        Role.SCENARIST,
+        Role.EDITOR,
+        Role.PUBLISHER,
+    }:
         available_sections.append("history")
 
     updates = {
@@ -412,6 +581,7 @@ async def list_scenarios(
     project_id: uuid.UUID | None = None,
     scenario_statuses: list[ScenarioStatus] | None = Query(None, alias="status"),
     assigned_scenarist_id: uuid.UUID | None = None,
+    queue: ScenarioQueue | None = None,
     deadline_from: date | None = None,
     deadline_to: date | None = None,
     search: str | None = Query(None, max_length=200),
@@ -433,6 +603,8 @@ async def list_scenarios(
         .scalar_subquery()
     )
     filters = []
+    if queue is not None:
+        filters.append(queue_filter(queue, user))
     if project_id:
         filters.append(Scenario.project_id == project_id)
     if scenario_statuses:
@@ -548,6 +720,7 @@ async def list_scenario_sheet(
     project_id: uuid.UUID | None = None,
     scenario_statuses: list[ScenarioStatus] | None = Query(None, alias="status"),
     assigned_scenarist_id: uuid.UUID | None = None,
+    queue: ScenarioQueue | None = None,
     deadline_from: date | None = None,
     deadline_to: date | None = None,
     search: str | None = Query(None, max_length=200),
@@ -564,6 +737,8 @@ async def list_scenario_sheet(
         "Без названия",
     )
     filters = []
+    if queue is not None:
+        filters.append(queue_filter(queue, user))
     if project_id:
         filters.append(Scenario.project_id == project_id)
     if scenario_statuses:
@@ -1206,10 +1381,21 @@ async def get_scenario(
 async def update_scenario(
     scenario_id: uuid.UUID,
     payload: ScenarioUpdate,
-    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
+    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST)),
     session: AsyncSession = Depends(get_session),
 ) -> ScenarioRead:
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+
+    if user.role == Role.MANAGER:
+        denied_fields = sorted(payload.model_fields_set - {"assigned_scenarist_id"})
+        if denied_fields:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "message": "Scenario manager can only reassign the scenarist",
+                    "fields": denied_fields,
+                },
+            )
 
     changes = payload.model_dump(exclude_unset=True, exclude={"research", "content"})
     if "assigned_scenarist_id" in changes:
@@ -1268,7 +1454,9 @@ async def set_approval(
     scenario_id: uuid.UUID,
     stage: ApprovalStage,
     payload: ApprovalUpdate,
-    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.CLIENT)),
+    user: User = Depends(
+        require_roles(Role.MANAGER, Role.EDITOR_MANAGER, Role.CLIENT)
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> ScenarioApproval:
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
@@ -1348,7 +1536,7 @@ async def get_final_revision_gate(
 async def decide_final_revision_gate(
     scenario_id: uuid.UUID,
     payload: FinalRevisionGateUpdate,
-    user: User = Depends(require_roles(Role.MANAGER)),
+    user: User = Depends(require_roles(Role.EDITOR_MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> FinalClientRevisionGate:
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
@@ -1410,7 +1598,7 @@ async def create_comment(
 async def update_montage(
     scenario_id: uuid.UUID,
     payload: MontageUpdate,
-    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
+    user: User = Depends(require_roles(Role.SCENARIST, Role.EDITOR_MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> MontageTask:
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
@@ -1422,10 +1610,19 @@ async def update_montage(
     if scenario.montage is None:
         scenario.montage = MontageTask()
     montage_changes = payload.model_dump(exclude_unset=True)
-    if "assigned_editor_id" in montage_changes and user.role != Role.MANAGER:
+    allowed_fields = (
+        SCENARIST_MONTAGE_FIELDS
+        if user.role == Role.SCENARIST
+        else EDITOR_MANAGER_MONTAGE_FIELDS
+    )
+    denied_fields = sorted(set(montage_changes) - allowed_fields)
+    if denied_fields:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only manager can assign an editor",
+            detail={
+                "message": "Montage fields are not owned by this role",
+                "fields": denied_fields,
+            },
         )
     if (
         "assigned_editor_id" in montage_changes
@@ -1489,7 +1686,7 @@ async def update_montage_as_editor(
 async def update_publication(
     scenario_id: uuid.UUID,
     payload: PublicationUpdate,
-    user: User = Depends(require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR)),
+    user: User = Depends(require_roles(Role.SCENARIST)),
     session: AsyncSession = Depends(get_session),
 ) -> Publication:
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
@@ -1523,7 +1720,7 @@ async def update_publication(
 async def review_publication(
     scenario_id: uuid.UUID,
     payload: PublicationManagerReviewUpdate,
-    user: User = Depends(require_roles(Role.MANAGER)),
+    user: User = Depends(require_roles(Role.PUBLISHER_MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> Publication:
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)

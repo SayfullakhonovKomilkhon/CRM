@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from crm.creation import require_active_client
 from crm.database import get_session
-from crm.dependencies import get_current_user, require_roles
+from crm.dependencies import require_roles
 from crm.models import Client, Project, Role, User
 from crm.schemas import (
     ClientCreate,
@@ -24,12 +24,19 @@ from crm.schemas import (
 from crm.security import hash_password
 
 router = APIRouter(tags=["catalog"])
+require_catalog_reader = require_roles(
+    Role.MANAGER,
+    Role.EDITOR_MANAGER,
+    Role.PUBLISHER_MANAGER,
+    Role.SCENARIST,
+    Role.CLIENT,
+)
 
 
 @router.get("/clients", response_model=list[ClientRead])
 async def list_clients(
     active_only: bool = True,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_catalog_reader),
     session: AsyncSession = Depends(get_session),
 ) -> list[Client]:
     query = select(Client).order_by(Client.name)
@@ -117,7 +124,7 @@ async def update_client(
 async def list_projects(
     client_id: uuid.UUID | None = None,
     active_only: bool = True,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_catalog_reader),
     session: AsyncSession = Depends(get_session),
 ) -> list[Project]:
     query = select(Project).order_by(Project.name)
@@ -358,9 +365,7 @@ async def update_user(
 
 @router.get("/users/scenarists", response_model=list[UserOptionRead])
 async def list_scenarists(
-    _: User = Depends(
-        require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER)
-    ),
+    _: User = Depends(require_roles(Role.MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (
@@ -373,9 +378,7 @@ async def list_scenarists(
 
 @router.get("/users/editors", response_model=list[UserOptionRead])
 async def list_editors(
-    _: User = Depends(
-        require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER)
-    ),
+    _: User = Depends(require_roles(Role.MANAGER, Role.EDITOR_MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (
@@ -388,14 +391,38 @@ async def list_editors(
 
 @router.get("/users/publishers", response_model=list[UserOptionRead])
 async def list_publishers(
-    _: User = Depends(
-        require_roles(Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER)
-    ),
+    _: User = Depends(require_roles(Role.MANAGER, Role.PUBLISHER_MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (
         select(User)
         .where(User.role == Role.PUBLISHER, User.is_active.is_(True))
+        .order_by(User.full_name)
+    )
+    return list((await session.scalars(query)).all())
+
+
+@router.get("/users/editor-managers", response_model=list[UserOptionRead])
+async def list_editor_managers(
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> list[User]:
+    query = (
+        select(User)
+        .where(User.role == Role.EDITOR_MANAGER, User.is_active.is_(True))
+        .order_by(User.full_name)
+    )
+    return list((await session.scalars(query)).all())
+
+
+@router.get("/users/publisher-managers", response_model=list[UserOptionRead])
+async def list_publisher_managers(
+    _: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> list[User]:
+    query = (
+        select(User)
+        .where(User.role == Role.PUBLISHER_MANAGER, User.is_active.is_(True))
         .order_by(User.full_name)
     )
     return list((await session.scalars(query)).all())

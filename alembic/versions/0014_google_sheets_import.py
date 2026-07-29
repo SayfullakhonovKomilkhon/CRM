@@ -34,15 +34,22 @@ def upgrade() -> None:
     sync_mode.create(op.get_bind(), checkfirst=True)
     sync_status.create(op.get_bind(), checkfirst=True)
 
-    op.add_column(
-        "scenarios",
-        sa.Column("source_checksum", sa.String(length=64), nullable=True),
-    )
-    op.create_index(
-        "ix_scenarios_source_checksum",
-        "scenarios",
-        ["source_checksum"],
-    )
+    inspector = sa.inspect(op.get_bind())
+    scenario_columns = {
+        column["name"] for column in inspector.get_columns("scenarios")
+    }
+    if "source_checksum" not in scenario_columns:
+        op.add_column(
+            "scenarios",
+            sa.Column("source_checksum", sa.String(length=64), nullable=True),
+        )
+    scenario_indexes = {index["name"] for index in inspector.get_indexes("scenarios")}
+    if "ix_scenarios_source_checksum" not in scenario_indexes:
+        op.create_index(
+            "ix_scenarios_source_checksum",
+            "scenarios",
+            ["source_checksum"],
+        )
     op.execute(
         """
         DO $$
@@ -63,11 +70,18 @@ def upgrade() -> None:
         $$;
         """
     )
-    op.create_unique_constraint(
-        "uq_scenario_source_row",
-        "scenarios",
-        ["source_sheet_id", "source_tab", "source_row"],
-    )
+    scenario_constraints = {
+        constraint["name"] for constraint in inspector.get_unique_constraints("scenarios")
+    }
+    if "uq_scenario_source_row" not in scenario_constraints:
+        op.create_unique_constraint(
+            "uq_scenario_source_row",
+            "scenarios",
+            ["source_sheet_id", "source_tab", "source_row"],
+        )
+
+    if inspector.has_table("google_sheets_sync_runs"):
+        return
 
     op.create_table(
         "google_sheets_sync_runs",

@@ -18,12 +18,20 @@ SEQUENCE_NAME = "scenario_external_id_seq"
 
 
 def upgrade() -> None:
-    op.drop_constraint(
-        "uq_scenario_project_external_id",
-        "scenarios",
-        type_="unique",
+    inspector = sa.inspect(op.get_bind())
+    constraint_names = {
+        constraint["name"] for constraint in inspector.get_unique_constraints("scenarios")
+    }
+    if "uq_scenario_project_external_id" in constraint_names:
+        op.drop_constraint(
+            "uq_scenario_project_external_id",
+            "scenarios",
+            type_="unique",
+        )
+    op.execute(
+        f"CREATE SEQUENCE IF NOT EXISTS {SEQUENCE_NAME} "
+        "START WITH 1 INCREMENT BY 1 NO CYCLE"
     )
-    op.execute(f"CREATE SEQUENCE {SEQUENCE_NAME} START WITH 1 INCREMENT BY 1 NO CYCLE")
     op.execute("UPDATE scenarios SET external_id = NULL")
     op.execute(
         """
@@ -53,11 +61,12 @@ def upgrade() -> None:
         nullable=False,
         server_default=sa.text(f"nextval('{SEQUENCE_NAME}'::regclass)::text"),
     )
-    op.create_unique_constraint(
-        "uq_scenarios_external_id",
-        "scenarios",
-        ["external_id"],
-    )
+    if "uq_scenarios_external_id" not in constraint_names:
+        op.create_unique_constraint(
+            "uq_scenarios_external_id",
+            "scenarios",
+            ["external_id"],
+        )
     op.execute(f"ALTER SEQUENCE {SEQUENCE_NAME} OWNED BY scenarios.external_id")
 
 

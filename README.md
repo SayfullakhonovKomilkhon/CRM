@@ -19,6 +19,8 @@ Open:
 Demo accounts all use password `demo12345`:
 
 - `manager@crm.local`
+- `editor-manager@crm.local`
+- `publisher-manager@crm.local`
 - `scenarist@crm.local`
 - `editor@crm.local`
 - `client@crm.local`
@@ -39,6 +41,8 @@ The frontend base URL is `http://localhost:8000/api/v1`.
 - `GET /api/v1/users/scenarists`
 - `GET /api/v1/users/editors`
 - `GET /api/v1/users/publishers`
+- `GET /api/v1/users/editor-managers`
+- `GET /api/v1/users/publisher-managers`
 - `GET|POST /api/v1/scenarios`
 - `GET|PATCH /api/v1/scenarios/{id}`
 - `PUT /api/v1/scenarios/{id}/approvals/{stage}`
@@ -58,7 +62,16 @@ The frontend base URL is `http://localhost:8000/api/v1`.
 `montage`, and `publication` sections are returned only by `GET /scenarios/{id}`.
 
 List filters include repeatable `status`, `project_id`, `assigned_scenarist_id`,
-`deadline_from`, `deadline_to`, full-text-style `search`, `sort_by`, and `sort_order`.
+`deadline_from`, `deadline_to`, full-text-style `search`, `sort_by`, `sort_order`, and
+the role-checked `queue` values:
+
+- `scenario_manager_review`;
+- `editor_manager_intake`, `editor_manager_inwork`, `editor_manager_check`,
+  `editor_manager_rework_review`;
+- `publisher_manager_queue`, `publisher_manager_inwork`.
+
+The same `queue` filter is available on `GET /scenarios/sheet`. Asking for another
+management level's queue returns `403`.
 
 ## Creation permissions
 
@@ -80,12 +93,14 @@ List filters include repeatable `status`, `project_id`, `assigned_scenarist_id`,
 ## Workflow actions
 
 - Client approves the script or returns it with a required comment.
-- Manager approves the source only after assigning an editor.
-- Editor submits the ready material; manager approves it or returns it with a comment.
-- A final-client revision first enters a manager gate. The manager either accepts it for editor
-  rework or rejects it with a response and returns the row to client review.
-- After final client approval, internal users prepare publication descriptions. Manager reviews
-  them and assigns an active publisher.
+- `manager` is the scenarist manager: assigns scenarists and performs
+  `responsible_review`. Existing manager users keep this role.
+- `editor_manager` assigns editors, reviews source material and montage compliance,
+  and decides the final-client revision gate.
+- `publisher_manager` reviews prepared publication data and assigns an active publisher.
+- A scenarist owns scenario/research/content, source preparation, and publication preparation.
+- Client owns only pre-generation and final-client approvals.
+- Editor and publisher own only their dedicated result endpoints.
 - Only the assigned publisher can mark the publication in progress or published. Publishing
   requires at least one platform URL and sets publication dates automatically.
 
@@ -99,6 +114,10 @@ and `409` for an inactive entity, wrong assignment role, or duplicate business i
 Only managers can create and update users, clients, and projects. `GET /users` supports
 `role` and `active_only` filters; `GET /clients` and `GET /projects` support
 `active_only=false` for archive screens.
+
+The full client and project catalogs are readable by all three manager levels and scenarists.
+Client users receive only their own client and projects. Editors and publishers receive
+`403` from both catalog endpoints. Write operations remain manager-only.
 
 User creation accepts `email`, `full_name`, `role`, optional `client_id`, and a password of at
 least eight characters. A `client` user must reference an active client. Internal roles must
@@ -149,7 +168,7 @@ migrations before each deployment, checks `/health`, and the container listens o
    GOOGLE_SHEETS_ENABLED=false
    ```
 
-   `SEED_DEMO_DATA=true` creates the five documented demo accounts for temporary testing.
+   `SEED_DEMO_DATA=true` creates the seven documented demo accounts for temporary testing.
    Set it to `false` and change/remove demo credentials before real use.
 
 4. Open Settings → Networking and generate a public domain.

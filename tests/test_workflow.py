@@ -44,14 +44,18 @@ def approval(stage: ApprovalStage, decision: ApprovalDecision = ApprovalDecision
 
 
 def test_workflow_decisions_are_role_safe() -> None:
-    require_stage_role(Role.MANAGER, ApprovalStage.SOURCE_MATERIAL)
-    require_stage_role(Role.MANAGER, ApprovalStage.MONTAGE_COMPLIANCE)
+    require_stage_role(Role.MANAGER, ApprovalStage.RESPONSIBLE_REVIEW)
+    require_stage_role(Role.EDITOR_MANAGER, ApprovalStage.SOURCE_MATERIAL)
+    require_stage_role(Role.EDITOR_MANAGER, ApprovalStage.MONTAGE_COMPLIANCE)
     require_stage_role(Role.CLIENT, ApprovalStage.PRE_GENERATION_CLIENT)
     require_stage_role(Role.CLIENT, ApprovalStage.FINAL_CLIENT)
 
     for role, stage in (
         (Role.CLIENT, ApprovalStage.SOURCE_MATERIAL),
+        (Role.MANAGER, ApprovalStage.SOURCE_MATERIAL),
         (Role.MANAGER, ApprovalStage.FINAL_CLIENT),
+        (Role.EDITOR_MANAGER, ApprovalStage.RESPONSIBLE_REVIEW),
+        (Role.PUBLISHER_MANAGER, ApprovalStage.MONTAGE_COMPLIANCE),
         (Role.SCENARIST, ApprovalStage.PRE_GENERATION_CLIENT),
         (Role.EDITOR, ApprovalStage.MONTAGE_COMPLIANCE),
         (Role.PUBLISHER, ApprovalStage.FINAL_CLIENT),
@@ -116,6 +120,14 @@ def test_active_workflow_does_not_require_legacy_responsible_review() -> None:
     assert stage_prerequisites_met(value, ApprovalStage.SOURCE_MATERIAL) is True
     assert stage_prerequisites_met(value, ApprovalStage.MONTAGE_COMPLIANCE) is True
     assert stage_prerequisites_met(value, ApprovalStage.FINAL_CLIENT) is True
+
+
+def test_client_review_requires_responsible_manager_approval() -> None:
+    value = scenario(approvals=[])
+
+    assert stage_prerequisites_met(value, ApprovalStage.PRE_GENERATION_CLIENT) is False
+    value.approvals.append(approval(ApprovalStage.RESPONSIBLE_REVIEW))
+    assert stage_prerequisites_met(value, ApprovalStage.PRE_GENERATION_CLIENT) is True
 
 
 def test_editor_queue_excludes_generation_and_includes_active_editing() -> None:

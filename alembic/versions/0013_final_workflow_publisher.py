@@ -46,94 +46,102 @@ def upgrade() -> None:
     publication_review.create(op.get_bind(), checkfirst=True)
     publisher_status.create(op.get_bind(), checkfirst=True)
 
-    op.create_table(
-        "final_client_revision_gates",
-        sa.Column("scenario_id", sa.Uuid(), nullable=False),
-        sa.Column(
-            "decision", gate_decision, server_default=sa.text("'PENDING'"), nullable=False
-        ),
-        sa.Column("request_comment", sa.Text(), nullable=False),
-        sa.Column("manager_comment", sa.Text(), nullable=True),
-        sa.Column("decided_by_id", sa.Uuid(), nullable=True),
-        sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
-        ),
-        sa.Column(
-            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
-        ),
-        sa.ForeignKeyConstraint(["decided_by_id"], ["users.id"]),
-        sa.ForeignKeyConstraint(["scenario_id"], ["scenarios.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("scenario_id"),
-    )
-    op.create_index(
-        "ix_final_client_revision_gates_decision",
-        "final_client_revision_gates",
-        ["decision"],
-    )
+    inspector = sa.inspect(op.get_bind())
+    if not inspector.has_table("final_client_revision_gates"):
+        op.create_table(
+            "final_client_revision_gates",
+            sa.Column("scenario_id", sa.Uuid(), nullable=False),
+            sa.Column(
+                "decision",
+                gate_decision,
+                server_default=sa.text("'PENDING'"),
+                nullable=False,
+            ),
+            sa.Column("request_comment", sa.Text(), nullable=False),
+            sa.Column("manager_comment", sa.Text(), nullable=True),
+            sa.Column("decided_by_id", sa.Uuid(), nullable=True),
+            sa.Column("decided_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.func.now(),
+                nullable=False,
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                server_default=sa.func.now(),
+                nullable=False,
+            ),
+            sa.ForeignKeyConstraint(["decided_by_id"], ["users.id"]),
+            sa.ForeignKeyConstraint(["scenario_id"], ["scenarios.id"], ondelete="CASCADE"),
+            sa.PrimaryKeyConstraint("scenario_id"),
+        )
+        op.create_index(
+            "ix_final_client_revision_gates_decision",
+            "final_client_revision_gates",
+            ["decision"],
+        )
 
-    op.add_column(
-        "publications", sa.Column("assigned_publisher_id", sa.Uuid(), nullable=True)
-    )
-    op.add_column(
-        "publications",
+    publication_columns = {
+        column["name"] for column in inspector.get_columns("publications")
+    }
+    publication_column_definitions = (
+        sa.Column("assigned_publisher_id", sa.Uuid(), nullable=True),
         sa.Column(
             "manager_review_decision",
             publication_review,
             server_default=sa.text("'PENDING'"),
             nullable=False,
         ),
-    )
-    op.add_column(
-        "publications", sa.Column("manager_review_comment", sa.Text(), nullable=True)
-    )
-    op.add_column(
-        "publications", sa.Column("manager_reviewed_by_id", sa.Uuid(), nullable=True)
-    )
-    op.add_column(
-        "publications", sa.Column("manager_reviewed_at", sa.DateTime(timezone=True), nullable=True)
-    )
-    op.add_column(
-        "publications",
+        sa.Column("manager_review_comment", sa.Text(), nullable=True),
+        sa.Column("manager_reviewed_by_id", sa.Uuid(), nullable=True),
+        sa.Column("manager_reviewed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "publisher_status",
             publisher_status,
             server_default=sa.text("'PENDING'"),
             nullable=False,
         ),
+        sa.Column("publisher_comment", sa.Text(), nullable=True),
+        sa.Column("dzen_url", sa.Text(), nullable=True),
+        sa.Column("youtube_url", sa.Text(), nullable=True),
+        sa.Column("tiktok_url", sa.Text(), nullable=True),
+        sa.Column("published_at", sa.DateTime(timezone=True), nullable=True),
     )
-    op.add_column("publications", sa.Column("publisher_comment", sa.Text(), nullable=True))
-    op.add_column("publications", sa.Column("dzen_url", sa.Text(), nullable=True))
-    op.add_column("publications", sa.Column("youtube_url", sa.Text(), nullable=True))
-    op.add_column("publications", sa.Column("tiktok_url", sa.Text(), nullable=True))
-    op.add_column(
-        "publications", sa.Column("published_at", sa.DateTime(timezone=True), nullable=True)
-    )
-    op.create_foreign_key(
-        "fk_publications_assigned_publisher",
-        "publications",
-        "users",
-        ["assigned_publisher_id"],
-        ["id"],
-    )
-    op.create_foreign_key(
-        "fk_publications_manager_reviewer",
-        "publications",
-        "users",
-        ["manager_reviewed_by_id"],
-        ["id"],
-    )
-    op.create_index(
-        "ix_publications_assigned_publisher_id", "publications", ["assigned_publisher_id"]
-    )
-    op.create_index(
-        "ix_publications_manager_review_decision",
-        "publications",
-        ["manager_review_decision"],
-    )
-    op.create_index(
-        "ix_publications_publisher_status", "publications", ["publisher_status"]
-    )
+    for column in publication_column_definitions:
+        if column.name not in publication_columns:
+            op.add_column("publications", column)
+
+    foreign_key_columns = {
+        tuple(constraint["constrained_columns"])
+        for constraint in inspector.get_foreign_keys("publications")
+    }
+    if ("assigned_publisher_id",) not in foreign_key_columns:
+        op.create_foreign_key(
+            "fk_publications_assigned_publisher",
+            "publications",
+            "users",
+            ["assigned_publisher_id"],
+            ["id"],
+        )
+    if ("manager_reviewed_by_id",) not in foreign_key_columns:
+        op.create_foreign_key(
+            "fk_publications_manager_reviewer",
+            "publications",
+            "users",
+            ["manager_reviewed_by_id"],
+            ["id"],
+        )
+
+    index_names = {index["name"] for index in inspector.get_indexes("publications")}
+    for name, columns in (
+        ("ix_publications_assigned_publisher_id", ["assigned_publisher_id"]),
+        ("ix_publications_manager_review_decision", ["manager_review_decision"]),
+        ("ix_publications_publisher_status", ["publisher_status"]),
+    ):
+        if name not in index_names:
+            op.create_index(name, "publications", columns)
 
     op.execute(
         """

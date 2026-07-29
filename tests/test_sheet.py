@@ -15,6 +15,12 @@ from crm.models import (
     Role,
     ScenarioStatus,
 )
+from crm.routers.scenarios import (
+    EDITOR_MANAGER_MONTAGE_FIELDS as API_EDITOR_MANAGER_MONTAGE_FIELDS,
+)
+from crm.routers.scenarios import (
+    SCENARIST_MONTAGE_FIELDS as API_SCENARIST_MONTAGE_FIELDS,
+)
 from crm.routers.scenarios import coerce_sheet_value, scenario_for_role
 from crm.schemas import (
     ApprovalUpdate,
@@ -23,13 +29,26 @@ from crm.schemas import (
     MontageUpdate,
     ResearchPayload,
 )
-from crm.sheet import columns_for_role, editable_fields_for_role, values_for_role
+from crm.sheet import (
+    EDITOR_MANAGER_MONTAGE_FIELDS,
+    SCENARIST_SOURCE_FIELDS,
+    columns_for_role,
+    editable_fields_for_role,
+    values_for_role,
+)
 
 
 def test_internal_roles_receive_all_sheet_columns() -> None:
     columns_by_role = {
         role: [column.field for column in columns_for_role(role)]
-        for role in (Role.MANAGER, Role.SCENARIST, Role.EDITOR, Role.PUBLISHER)
+        for role in (
+            Role.MANAGER,
+            Role.EDITOR_MANAGER,
+            Role.PUBLISHER_MANAGER,
+            Role.SCENARIST,
+            Role.EDITOR,
+            Role.PUBLISHER,
+        )
     }
 
     assert all(columns == columns_by_role[Role.MANAGER] for columns in columns_by_role.values())
@@ -86,8 +105,9 @@ def test_sheet_registry_contains_every_persisted_workflow_field() -> None:
     assert expected <= columns
 
 
-def test_editor_can_edit_all_visible_work_fields() -> None:
+def test_editor_can_edit_only_result_fields_during_active_stage() -> None:
     scenario = SimpleNamespace(
+        status=ScenarioStatus.EDITING,
         available_sections=["content", "montage"],
         available_approval_stages=[
             ApprovalStage.SOURCE_MATERIAL,
@@ -97,16 +117,11 @@ def test_editor_can_edit_all_visible_work_fields() -> None:
 
     editable = set(editable_fields_for_role(scenario, Role.EDITOR))
 
-    assert "scenario_date" in editable
-    assert "content.script_text" in editable
-    assert "content.montage_brief" in editable
-    assert "montage.client_brand_style" in editable
-    assert "montage.price" in editable
-    assert "approval.source_material.decision" not in editable
-    assert "approval.montage_compliance.comment" not in editable
-    assert "external_id" not in editable
-    assert "project.name" not in editable
-    assert "scenarist.name" not in editable
+    assert editable == {
+        "montage.ready_material_url",
+        "montage.editor_status",
+        "montage.editor_comment",
+    }
 
 
 def test_editor_result_is_locked_outside_an_active_editor_stage() -> None:
@@ -118,10 +133,7 @@ def test_editor_result_is_locked_outside_an_active_editor_stage() -> None:
 
     editable = set(editable_fields_for_role(scenario, Role.EDITOR))
 
-    assert "content.script_text" in editable
-    assert "montage.ready_material_url" not in editable
-    assert "montage.editor_status" not in editable
-    assert "montage.editor_comment" not in editable
+    assert editable == set()
 
 
 @pytest.mark.parametrize("status", list(EditorStatus))
@@ -171,18 +183,17 @@ def test_approval_payload_keeps_note_separate_from_comment() -> None:
     assert payload.note == "Отдельное примечание"
 
 
-@pytest.mark.parametrize("role", [Role.MANAGER, Role.SCENARIST])
-def test_manager_and_scenarist_can_edit_all_visible_work_fields(role: Role) -> None:
+def test_scenarist_edits_scenario_source_and_publication_preparation() -> None:
     scenario = SimpleNamespace(
         available_sections=["content", "approvals", "publication"],
         available_approval_stages=list(ApprovalStage),
     )
 
-    editable = set(editable_fields_for_role(scenario, role))
+    editable = set(editable_fields_for_role(scenario, Role.SCENARIST))
 
     assert "research.full_analysis" in editable
     assert "content.script_text" in editable
-    assert "approval.pre_generation_client.comment" not in editable
+    assert "montage.source_material_url" not in editable
     assert "approval.final_client.decision" not in editable
     assert "publication.description_instagram" in editable
     assert "publication.is_published" not in editable
@@ -193,21 +204,18 @@ def test_manager_and_scenarist_can_edit_all_visible_work_fields(role: Role) -> N
     assert "approval.pre_generation_client.decided_at" not in editable
 
 
-@pytest.mark.parametrize("role", [Role.MANAGER, Role.SCENARIST, Role.EDITOR])
-def test_internal_roles_can_edit_all_available_work_fields(role: Role) -> None:
+def test_scenarist_source_fields_open_with_montage_section() -> None:
     scenario = SimpleNamespace(
         available_sections=["content", "approvals", "montage", "publication"],
         available_approval_stages=list(ApprovalStage),
     )
 
-    editable = set(editable_fields_for_role(scenario, role))
+    editable = set(editable_fields_for_role(scenario, Role.SCENARIST))
 
     assert "research.full_analysis" in editable
     assert "content.script_text" in editable
-    if role == Role.EDITOR:
-        assert "montage.editor_comment" in editable
-    else:
-        assert "montage.editor_comment" not in editable
+    assert "montage.source_material_url" in editable
+    assert "montage.editor_comment" not in editable
     assert "publication.description_instagram" in editable
     assert "approval.responsible_review.decision" not in editable
     assert "approval.final_client.comment" not in editable
@@ -215,6 +223,54 @@ def test_internal_roles_can_edit_all_available_work_fields(role: Role) -> None:
     assert "project.name" not in editable
     assert "scenarist.name" not in editable
     assert "approval.final_client.decided_at" not in editable
+
+
+def test_three_manager_levels_have_disjoint_sheet_actions() -> None:
+    scenario = SimpleNamespace(
+        available_sections=["content", "approvals", "montage", "publication"],
+        available_approval_stages=list(ApprovalStage),
+        final_revision_gate=SimpleNamespace(decision=GateDecision.PENDING),
+        publication=SimpleNamespace(
+            manager_review_decision=PublicationReviewDecision.PENDING
+        ),
+    )
+
+    scenario_manager = set(editable_fields_for_role(scenario, Role.MANAGER))
+    editor_manager = set(
+        editable_fields_for_role(scenario, Role.EDITOR_MANAGER)
+    )
+    publisher_manager = set(
+        editable_fields_for_role(scenario, Role.PUBLISHER_MANAGER)
+    )
+
+    assert {
+        "assigned_scenarist_id",
+        "approval.responsible_review.decision",
+        "approval.responsible_review.comment",
+    } <= scenario_manager
+    assert "montage.assigned_editor_id" not in scenario_manager
+    assert "publication.assigned_publisher_id" not in scenario_manager
+
+    assert "montage.assigned_editor_id" in editor_manager
+    assert "approval.source_material.decision" in editor_manager
+    assert "approval.montage_compliance.decision" in editor_manager
+    assert "final_revision_gate.decision" in editor_manager
+    assert "assigned_scenarist_id" not in editor_manager
+    assert "publication.assigned_publisher_id" not in editor_manager
+
+    assert "publication.assigned_publisher_id" in publisher_manager
+    assert "publication.manager_review_decision" in publisher_manager
+    assert "montage.assigned_editor_id" not in publisher_manager
+    assert "approval.responsible_review.decision" not in publisher_manager
+
+
+def test_sheet_and_direct_montage_ownership_contracts_match() -> None:
+    assert {
+        f"montage.{field}" for field in API_SCENARIST_MONTAGE_FIELDS
+    } == SCENARIST_SOURCE_FIELDS
+    assert {
+        f"montage.{field}" for field in API_EDITOR_MANAGER_MONTAGE_FIELDS
+    } == EDITOR_MANAGER_MONTAGE_FIELDS
 
 
 def test_client_edits_only_owned_approvals() -> None:
@@ -249,6 +305,12 @@ def test_only_manager_can_reassign_scenarist_from_sheet() -> None:
 
     assert "assigned_scenarist_id" in editable_fields_for_role(scenario, Role.MANAGER)
     assert "assigned_scenarist_id" not in editable_fields_for_role(scenario, Role.SCENARIST)
+    assert "assigned_scenarist_id" not in editable_fields_for_role(
+        scenario, Role.EDITOR_MANAGER
+    )
+    assert "assigned_scenarist_id" not in editable_fields_for_role(
+        scenario, Role.PUBLISHER_MANAGER
+    )
     assert "assigned_scenarist_id" not in editable_fields_for_role(scenario, Role.EDITOR)
     assert "assigned_scenarist_id" not in editable_fields_for_role(scenario, Role.CLIENT)
 

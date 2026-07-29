@@ -19,18 +19,39 @@ EDITOR_VISIBLE_STATUSES = frozenset(
         ScenarioStatus.PUBLISHED,
     }
 )
+EDITOR_MANAGER_VISIBLE_STATUSES = frozenset(
+    {
+        ScenarioStatus.SENT_TO_GENERATION,
+        ScenarioStatus.HANDED_TO_EDITOR,
+        ScenarioStatus.EDITING,
+        ScenarioStatus.CLIENT_REVIEW,
+        ScenarioStatus.MANAGER_REVISION_REVIEW,
+        ScenarioStatus.APPROVED,
+        ScenarioStatus.READY_TO_PUBLISH,
+        ScenarioStatus.PUBLISHED,
+    }
+)
 EDITOR_ACTION_STATUSES = frozenset(
     {ScenarioStatus.HANDED_TO_EDITOR, ScenarioStatus.EDITING}
 )
 PUBLISHER_VISIBLE_STATUSES = frozenset(
     {ScenarioStatus.READY_TO_PUBLISH, ScenarioStatus.PUBLISHED}
 )
+PUBLISHER_MANAGER_VISIBLE_STATUSES = frozenset(
+    {
+        ScenarioStatus.APPROVED,
+        ScenarioStatus.READY_TO_PUBLISH,
+        ScenarioStatus.PUBLISHED,
+    }
+)
 
 ROLE_APPROVAL_STAGES: dict[Role, set[ApprovalStage]] = {
-    Role.MANAGER: {
+    Role.MANAGER: {ApprovalStage.RESPONSIBLE_REVIEW},
+    Role.EDITOR_MANAGER: {
         ApprovalStage.SOURCE_MATERIAL,
         ApprovalStage.MONTAGE_COMPLIANCE,
     },
+    Role.PUBLISHER_MANAGER: set(),
     Role.SCENARIST: set(),
     Role.EDITOR: set(),
     Role.CLIENT: {
@@ -102,7 +123,11 @@ def stage_prerequisites_met(scenario: Scenario, stage: ApprovalStage) -> bool:
     if stage == ApprovalStage.RESPONSIBLE_REVIEW:
         return bool(scenario.content and scenario.content.script_text)
     if stage == ApprovalStage.PRE_GENERATION_CLIENT:
-        return bool(scenario.content and scenario.content.script_text)
+        return bool(
+            scenario.content
+            and scenario.content.script_text
+            and is_approved(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+        )
     if stage == ApprovalStage.SOURCE_MATERIAL:
         return bool(
             is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
@@ -132,7 +157,9 @@ def require_stage_prerequisites(scenario: Scenario, stage: ApprovalStage) -> Non
         return
     messages = {
         ApprovalStage.RESPONSIBLE_REVIEW: "Script text is required before responsible review",
-        ApprovalStage.PRE_GENERATION_CLIENT: "Script text is required before client review",
+        ApprovalStage.PRE_GENERATION_CLIENT: (
+            "Responsible manager approval is required before client review"
+        ),
         ApprovalStage.SOURCE_MATERIAL: (
             "Client script approval and source material are required"
         ),

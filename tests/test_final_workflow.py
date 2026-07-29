@@ -40,6 +40,14 @@ def manager():
     return SimpleNamespace(id=uuid.uuid4(), role=Role.MANAGER)
 
 
+def editor_manager():
+    return SimpleNamespace(id=uuid.uuid4(), role=Role.EDITOR_MANAGER)
+
+
+def publisher_manager():
+    return SimpleNamespace(id=uuid.uuid4(), role=Role.PUBLISHER_MANAGER)
+
+
 def publisher(*, active=True):
     return SimpleNamespace(id=uuid.uuid4(), role=Role.PUBLISHER, is_active=active)
 
@@ -90,7 +98,7 @@ def test_approved_final_revision_gate_routes_work_to_editor() -> None:
         scenario,
         GateManagerDecision.APPROVED,
         "Причина весомая",
-        manager(),
+        editor_manager(),
     )
 
     assert gate.decision == GateDecision.APPROVED
@@ -118,7 +126,7 @@ def test_rejected_final_revision_gate_returns_to_client_review() -> None:
         scenario,
         GateManagerDecision.REJECTED,
         "Доработка не требуется",
-        manager(),
+        editor_manager(),
     )
 
     assert gate.decision == GateDecision.REJECTED
@@ -147,7 +155,7 @@ async def test_manager_approves_publication_and_assigns_active_publisher() -> No
         PublicationManagerDecision.APPROVED,
         "Можно публиковать",
         assigned_publisher.id,
-        manager(),
+        publisher_manager(),
     )
 
     assert scenario.publication.assigned_publisher_id == assigned_publisher.id
@@ -172,7 +180,7 @@ async def test_approved_publication_review_cannot_be_reassigned_without_reopenin
             PublicationManagerDecision.APPROVED,
             "Повторное назначение",
             uuid.uuid4(),
-            manager(),
+            publisher_manager(),
         )
     assert error.value.status_code == 409
 
@@ -200,26 +208,43 @@ def test_publisher_marks_material_published_with_automatic_dates() -> None:
     assert scenario.status == ScenarioStatus.PUBLISHED
 
 
-def test_manager_and_publisher_receive_only_their_workflow_actions() -> None:
+def test_management_roles_and_publisher_receive_only_their_workflow_actions() -> None:
     gate = SimpleNamespace(decision=GateDecision.PENDING)
     pending_publication = publication()
     approved_publication = publication(manager_review_decision=PublicationReviewDecision.APPROVED)
-    manager_view = SimpleNamespace(
+    editor_manager_view = SimpleNamespace(
         available_sections=["content", "approvals", "publication"],
         available_approval_stages=[],
         final_revision_gate=gate,
         publication=pending_publication,
     )
-    publisher_view = SimpleNamespace(publication=approved_publication)
+    publisher_manager_view = SimpleNamespace(
+        available_sections=["publication"],
+        available_approval_stages=[],
+        final_revision_gate=None,
+        publication=pending_publication,
+    )
+    publisher_view = SimpleNamespace(
+        available_sections=["publication"],
+        publication=approved_publication,
+    )
 
-    manager_fields = set(editable_fields_for_role(manager_view, Role.MANAGER))
+    editor_manager_fields = set(
+        editable_fields_for_role(editor_manager_view, Role.EDITOR_MANAGER)
+    )
+    publisher_manager_fields = set(
+        editable_fields_for_role(
+            publisher_manager_view,
+            Role.PUBLISHER_MANAGER,
+        )
+    )
     publisher_fields = set(editable_fields_for_role(publisher_view, Role.PUBLISHER))
 
-    assert "final_revision_gate.decision" in manager_fields
-    assert "publication.assigned_publisher_id" in manager_fields
-    assert "publication.manager_review_decision" in manager_fields
-    assert "publication.publisher_status" not in manager_fields
-    assert "publication.publication_date" not in manager_fields
+    assert "final_revision_gate.decision" in editor_manager_fields
+    assert "publication.assigned_publisher_id" not in editor_manager_fields
+    assert "publication.assigned_publisher_id" in publisher_manager_fields
+    assert "publication.manager_review_decision" in publisher_manager_fields
+    assert "publication.publisher_status" not in publisher_manager_fields
     assert publisher_fields == {
         "publication.publisher_status",
         "publication.publisher_comment",
@@ -230,7 +255,7 @@ def test_manager_and_publisher_receive_only_their_workflow_actions() -> None:
     }
 
 
-def test_approved_publication_review_is_locked_for_manager() -> None:
+def test_approved_publication_review_is_locked_for_publisher_manager() -> None:
     manager_view = SimpleNamespace(
         available_sections=["publication"],
         available_approval_stages=[],
@@ -240,7 +265,9 @@ def test_approved_publication_review_is_locked_for_manager() -> None:
         ),
     )
 
-    manager_fields = set(editable_fields_for_role(manager_view, Role.MANAGER))
+    manager_fields = set(
+        editable_fields_for_role(manager_view, Role.PUBLISHER_MANAGER)
+    )
 
     assert "publication.assigned_publisher_id" not in manager_fields
     assert "publication.manager_review_decision" not in manager_fields
@@ -257,9 +284,35 @@ def test_gate_comment_is_required() -> None:
 
     with pytest.raises(HTTPException) as error:
         apply_final_revision_gate_decision(
-            scenario, GateManagerDecision.APPROVED, "", manager()
+            scenario, GateManagerDecision.APPROVED, "", editor_manager()
         )
     assert error.value.status_code == 422
+
+
+def test_wrong_manager_level_cannot_decide_gate() -> None:
+    scenario = SimpleNamespace(approvals=[], final_revision_gate=None)
+    with pytest.raises(HTTPException) as error:
+        apply_final_revision_gate_decision(
+            scenario,
+            GateManagerDecision.APPROVED,
+            "comment",
+            manager(),
+        )
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_wrong_manager_level_cannot_review_publication() -> None:
+    with pytest.raises(HTTPException) as error:
+        await apply_publication_manager_review(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            PublicationManagerDecision.APPROVED,
+            "comment",
+            uuid.uuid4(),
+            manager(),
+        )
+    assert error.value.status_code == 403
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,8 @@ from crm.database import Base
 class Role(StrEnum):
     SCENARIST = "scenarist"
     MANAGER = "manager"
+    EDITOR_MANAGER = "editor_manager"
+    PUBLISHER_MANAGER = "publisher_manager"
     EDITOR = "editor"
     CLIENT = "client"
     PUBLISHER = "publisher"
