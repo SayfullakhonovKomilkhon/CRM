@@ -56,9 +56,14 @@ function onCrmEdit(event) {
     if (Object.keys(changedFields).length === 0) continue;
 
     const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
-    let rowId = String(rowIdCell.getValue() || "").trim();
-    if (!rowId) {
+    const rowIdValue = rowIdCell.getValue();
+    let rowId = typeof rowIdValue === "string" ? rowIdValue.trim() : "";
+    if (!isUuid_(rowId)) {
       rowId = Utilities.getUuid();
+      // A newly appended service column can inherit checkbox validation from
+      // its left neighbour. Remove validation only from this identity cell so
+      // FALSE/TRUE can never become a shared CRM row identifier.
+      rowIdCell.clearDataValidations();
       rowIdCell.setValue(rowId);
     }
     const payload = {
@@ -110,11 +115,17 @@ function markCrmOrigin_(sheetId, rowNumber, ttlSeconds) {
 }
 
 function hmacHex_(secret, value) {
-  return bytesToHex_(Utilities.computeHmacSha256Signature(value, secret));
+  return bytesToHex_(Utilities.computeHmacSha256Signature(
+    utf8Bytes_(value),
+    utf8Bytes_(secret)
+  ));
 }
 
 function sha256Hex_(value) {
-  return bytesToHex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, value));
+  return bytesToHex_(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    utf8Bytes_(value)
+  ));
 }
 
 function stableJson_(value) {
@@ -132,9 +143,18 @@ function bytesToHex_(bytes) {
   }).join("");
 }
 
+function utf8Bytes_(value) {
+  return Utilities.newBlob(String(value), "text/plain").getBytes();
+}
+
 function columnNumber_(letters) {
   return String(letters).toUpperCase().split("").reduce(
     (result, character) => result * 26 + character.charCodeAt(0) - 64,
     0
   );
+}
+
+function isUuid_(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    .test(String(value || ""));
 }

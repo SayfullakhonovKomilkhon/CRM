@@ -12,6 +12,7 @@ from fastapi import HTTPException, status
 from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from crm.config import Settings
 from crm.google_sheets import (
@@ -362,6 +363,11 @@ async def process_inbound_event(
         .where(
             Scenario.sheet_source_id == source.id,
             Scenario.crm_row_id == event.crm_row_id,
+        )
+        .options(
+            selectinload(Scenario.research),
+            selectinload(Scenario.content),
+            selectinload(Scenario.approvals),
         )
         .with_for_update()
     )

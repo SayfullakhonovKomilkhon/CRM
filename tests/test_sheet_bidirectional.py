@@ -27,6 +27,7 @@ from crm.sheet_sync import (
     enqueue_sheet_writeback,
     finalize_inbound_revision,
     inbound_update_allowed,
+    process_inbound_event,
     source_metadata_matches,
     source_webhook_secret,
     validate_column_map,
@@ -110,6 +111,12 @@ def test_inbound_values_use_scenario_validation_before_mutation():
     with pytest.raises(ValidationError, match="less than or equal to 100"):
         _set_values(value, {"score": 101})
     assert value.score is None
+
+
+def test_inbound_update_eager_loads_mutable_scenario_relationships():
+    source = inspect.getsource(process_inbound_event)
+    for relationship in ("research", "content", "approvals"):
+        assert f"selectinload(Scenario.{relationship})" in source
 
 
 def test_webhook_hmac_timestamp_and_wrong_signature():
