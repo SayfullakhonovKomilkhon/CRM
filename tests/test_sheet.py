@@ -32,6 +32,7 @@ from crm.schemas import (
 from crm.sheet import (
     EDITOR_MANAGER_MONTAGE_FIELDS,
     SCENARIST_SOURCE_FIELDS,
+    SHEET_FIELDS,
     columns_for_role,
     editable_fields_for_role,
     values_for_role,
@@ -91,7 +92,7 @@ def test_client_receives_only_the_safe_workflow_projection_in_order() -> None:
 
 
 def test_sheet_registry_contains_every_persisted_workflow_field() -> None:
-    columns = {column.field for column in columns_for_role(Role.SCENARIST)}
+    columns = {column.field for column in SHEET_FIELDS}
     expected = {
         "content.claude_context",
         "content.ai_review",
@@ -109,6 +110,80 @@ def test_sheet_registry_contains_every_persisted_workflow_field() -> None:
     }
 
     assert expected <= columns
+
+
+def test_each_internal_role_receives_only_its_workflow_columns() -> None:
+    scenarist = {column.field for column in columns_for_role(Role.SCENARIST)}
+    editor_manager = {
+        column.field for column in columns_for_role(Role.EDITOR_MANAGER)
+    }
+    editor = {column.field for column in columns_for_role(Role.EDITOR)}
+    publisher_manager = {
+        column.field for column in columns_for_role(Role.PUBLISHER_MANAGER)
+    }
+    publisher = {column.field for column in columns_for_role(Role.PUBLISHER)}
+
+    assert "research.full_analysis" in scenarist
+    assert "montage.source_material_url" in scenarist
+    assert "publication.preparation_status" in scenarist
+    assert "montage.assigned_editor_id" not in scenarist
+    assert "montage.price" not in scenarist
+    assert "montage.editor_status" not in scenarist
+    assert "publication.assigned_publisher_id" not in scenarist
+    assert "publication.publisher_status" not in scenarist
+
+    assert "montage.assigned_editor_id" in editor_manager
+    assert "approval.montage_compliance.decision" in editor_manager
+    assert "research.full_analysis" not in editor_manager
+    assert "publication.description_youtube" not in editor_manager
+
+    assert "content.montage_brief" in editor
+    assert "montage.editor_status" in editor
+    assert "montage.payment_due_date" in editor
+    assert "research.full_analysis" not in editor
+    assert "montage.assigned_editor_id" not in editor
+    assert "publication.description_youtube" not in editor
+
+    assert "publication.assigned_publisher_id" in publisher_manager
+    assert "publication.manager_review_decision" in publisher_manager
+    assert "montage.ready_material_url" in publisher_manager
+    assert "content.script_text" not in publisher_manager
+    assert "montage.price" not in publisher_manager
+
+    assert "publication.publisher_brief" in publisher
+    assert "publication.publisher_status" in publisher
+    assert "publication.youtube_url" in publisher
+    assert "publication.assigned_publisher_id" not in publisher
+    assert "publication.engagement_metrics" not in publisher
+    assert "content.script_text" not in publisher
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        Role.MANAGER,
+        Role.SCENARIST,
+        Role.EDITOR_MANAGER,
+        Role.EDITOR,
+        Role.PUBLISHER_MANAGER,
+        Role.PUBLISHER,
+    ],
+)
+def test_every_editable_field_is_present_in_the_roles_projection(role: Role) -> None:
+    scenario = SimpleNamespace(
+        status=ScenarioStatus.EDITING,
+        available_sections=["content", "approvals", "montage", "publication"],
+        available_approval_stages=list(ApprovalStage),
+        final_revision_gate=SimpleNamespace(decision=GateDecision.PENDING),
+        publication=SimpleNamespace(
+            manager_review_decision=PublicationReviewDecision.PENDING
+        ),
+    )
+
+    visible = {column.field for column in columns_for_role(role)}
+    editable = set(editable_fields_for_role(scenario, role))
+
+    assert editable <= visible
 
 
 def test_source_material_status_is_server_controlled_for_scenarist() -> None:

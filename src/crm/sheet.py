@@ -495,20 +495,153 @@ CLIENT_SHEET_FIELD_NAMES = (
     "publication.published_at",
 )
 
+CORE_SHEET_FIELD_NAMES = {
+    "scenario_date",
+    "external_id",
+    "project.name",
+    "project.client_name",
+    "scenarist.name",
+    "speaker",
+    "deadline",
+}
+
+SCENARIO_MANAGER_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
+    item.field
+    for item in SHEET_FIELDS
+    if item.group in {"Исследование", "Сценарий"}
+} | {
+    "assigned_scenarist_id",
+    "approval.responsible_review.decision",
+    "approval.responsible_review.comment",
+}
+
+SCENARIST_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
+    item.field
+    for item in SHEET_FIELDS
+    if item.group in {"Исследование", "Сценарий"}
+} | {
+    "approval.responsible_review.decision",
+    "approval.responsible_review.comment",
+    "approval.pre_generation_client.decision",
+    "approval.pre_generation_client.comment",
+    "approval.pre_generation_client.note",
+    "approval.pre_generation_client.decided_at",
+    "montage.source_material_url",
+    "montage.client_brand_style",
+    "montage.extra_brief",
+    "montage.material_status",
+    "approval.source_material.decision",
+    "approval.source_material.comment",
+    "montage.scenarist_material_comment",
+    "montage.ready_material_url",
+    "approval.montage_compliance.decision",
+    "approval.montage_compliance.comment",
+    "montage.scenarist_revision_status",
+    "montage.scenarist_revision_comment",
+    "approval.final_client.decision",
+    "approval.final_client.comment",
+    "approval.final_client.decided_at",
+    "final_revision_gate.request_comment",
+    "final_revision_gate.decision",
+    "final_revision_gate.manager_comment",
+    "publication.publisher_brief",
+    "publication.manager_review_decision",
+    "publication.manager_review_comment",
+    "publication.manager_reviewed_at",
+    "publication.description_dzen",
+    "publication.description_youtube",
+    "publication.description_tiktok",
+    "publication.description_instagram",
+    "publication.ai_social_descriptions",
+    "publication.leia_script",
+    "publication.preparation_status",
+}
+
+EDITOR_MANAGER_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
+    "content.cover_text",
+    "content.script_text",
+    "content.montage_brief",
+    "content.scenarist_comment",
+    "approval.pre_generation_client.decision",
+    "approval.pre_generation_client.comment",
+    "approval.pre_generation_client.decided_at",
+} | {
+    item.field
+    for item in SHEET_FIELDS
+    if item.group in {"Монтаж", "Результат монтажа", "Проверка"}
+}
+
+EDITOR_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
+    "content.cover_text",
+    "content.script_text",
+    "content.montage_brief",
+    "content.scenarist_comment",
+    "approval.pre_generation_client.decision",
+    "montage.source_material_url",
+    "montage.client_brand_style",
+    "montage.extra_brief",
+    "montage.material_status",
+    "approval.source_material.decision",
+    "approval.source_material.comment",
+    "montage.assigned_editor_name",
+    "montage.price",
+    "montage.payment_due_date",
+    "montage.scenarist_material_comment",
+} | {
+    item.field
+    for item in SHEET_FIELDS
+    if item.group in {"Результат монтажа", "Проверка"}
+}
+
+PUBLISHER_MANAGER_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
+    "montage.ready_material_url",
+    "approval.final_client.decision",
+    "approval.final_client.comment",
+    "approval.final_client.decided_at",
+} | {
+    item.field for item in SHEET_FIELDS if item.group == "Публикация"
+}
+
+PUBLISHER_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
+    "montage.ready_material_url",
+    "approval.final_client.decision",
+    "publication.publication_date",
+    "publication.publisher_brief",
+    "publication.assigned_publisher_name",
+    "publication.manager_review_decision",
+    "publication.manager_review_comment",
+    "publication.manager_reviewed_at",
+    "publication.description_dzen",
+    "publication.description_youtube",
+    "publication.description_tiktok",
+    "publication.description_instagram",
+    "publication.is_published",
+    "publication.instagram_url",
+    "publication.dzen_url",
+    "publication.youtube_url",
+    "publication.tiktok_url",
+    "publication.publisher_status",
+    "publication.publisher_comment",
+    "publication.published_at",
+}
+
+ROLE_SHEET_FIELD_NAMES = {
+    Role.MANAGER: SCENARIO_MANAGER_SHEET_FIELD_NAMES,
+    Role.SCENARIST: SCENARIST_SHEET_FIELD_NAMES,
+    Role.EDITOR_MANAGER: EDITOR_MANAGER_SHEET_FIELD_NAMES,
+    Role.EDITOR: EDITOR_SHEET_FIELD_NAMES,
+    Role.PUBLISHER_MANAGER: PUBLISHER_MANAGER_SHEET_FIELD_NAMES,
+    Role.PUBLISHER: PUBLISHER_SHEET_FIELD_NAMES,
+}
+
 
 def fields_for_role(role: Role) -> tuple[SheetFieldSpec, ...]:
     if role == Role.ADMIN:
         return ()
     if role == Role.CLIENT:
         return tuple(SHEET_FIELD_MAP[name] for name in CLIENT_SHEET_FIELD_NAMES)
-    if role == Role.MANAGER:
-        return tuple(
-            item
-            for item in SHEET_FIELDS
-            if item.group in {"Основное", "Исследование", "Сценарий"}
-            or item.field.startswith("approval.responsible_review.")
-        )
-    return SHEET_FIELDS
+    allowed_fields = ROLE_SHEET_FIELD_NAMES.get(role, set())
+    return tuple(item for item in SHEET_FIELDS if item.field in allowed_fields)
 
 
 def columns_for_role(role: Role) -> list[SheetColumnRead]:
