@@ -881,29 +881,29 @@ async def list_scenario_sheet(
 
     latest_writebacks: dict[uuid.UUID, SheetWritebackStatus] = {}
     if scenario_ids and user.role in SYNC_STATUS_ROLES:
-        latest_created_at = (
+        ranked_writebacks = (
             select(
                 SheetWritebackEvent.scenario_id.label("scenario_id"),
-                func.max(SheetWritebackEvent.created_at).label("created_at"),
+                SheetWritebackEvent.status.label("status"),
+                func.row_number()
+                .over(
+                    partition_by=SheetWritebackEvent.scenario_id,
+                    order_by=(
+                        SheetWritebackEvent.created_at.desc(),
+                        SheetWritebackEvent.id.desc(),
+                    ),
+                )
+                .label("row_number"),
             )
             .where(SheetWritebackEvent.scenario_id.in_(scenario_ids))
-            .group_by(SheetWritebackEvent.scenario_id)
             .subquery()
         )
         event_rows = (
             await session.execute(
                 select(
-                    SheetWritebackEvent.scenario_id,
-                    SheetWritebackEvent.status,
-                ).join(
-                    latest_created_at,
-                    and_(
-                        SheetWritebackEvent.scenario_id
-                        == latest_created_at.c.scenario_id,
-                        SheetWritebackEvent.created_at
-                        == latest_created_at.c.created_at,
-                    ),
-                )
+                    ranked_writebacks.c.scenario_id,
+                    ranked_writebacks.c.status,
+                ).where(ranked_writebacks.c.row_number == 1)
             )
         ).all()
         latest_writebacks = {
@@ -955,11 +955,11 @@ async def list_scenario_sheet(
 def scenario_create_writeback(
     payload: ScenarioCreate,
     external_id: str,
-    assigned_scenarist_id: uuid.UUID,
+    scenarist_name: str,
 ) -> dict[str, object]:
     values: dict[str, object | None] = {
         "external_id": external_id,
-        "assigned_scenarist_id": assigned_scenarist_id,
+        "scenarist.name": scenarist_name,
         "scenario_date": payload.scenario_date,
         "deadline": payload.deadline,
         "score": payload.score,
@@ -988,13 +988,19 @@ def scenario_create_writeback(
     }
 
 
-def loaded_scenario_writeback(scenario: Scenario) -> dict[str, object]:
+def loaded_scenario_writeback(
+    scenario: Scenario,
+    *,
+    scenarist_name: str | None = None,
+) -> dict[str, object]:
     approvals = {
         item.stage.value: item
         for item in getattr(scenario, "approvals", ())
     }
     values: dict[str, object] = {}
     for item in SHEET_FIELDS:
+        if item.field == "assigned_scenarist_id":
+            continue
         if item.field.startswith("approval."):
             _, stage, attribute = item.field.split(".")
             value = getattr(approvals.get(stage), attribute, None)
@@ -1008,6 +1014,8 @@ def loaded_scenario_writeback(scenario: Scenario) -> dict[str, object]:
             value = value.value
         if value is not None:
             values[item.field] = value
+    if scenarist_name is not None:
+        values["scenarist.name"] = scenarist_name
     return values
 
 
@@ -1036,15 +1044,16 @@ async def assign_scenarist_without_moving_sheet_row(
     session: AsyncSession,
     scenario: Scenario,
     assigned_scenarist_id: uuid.UUID | None,
-) -> bool:
+) -> tuple[bool, str]:
     if assigned_scenarist_id is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="assigned_scenarist_id is required for scenario manager",
         )
-    assigned_scenarist_id = require_assignable_scenarist(
+    assigned_scenarist = require_assignable_scenarist(
         await session.get(User, assigned_scenarist_id)
-    ).id
+    )
+    assigned_scenarist_id = assigned_scenarist.id
     if scenario.sheet_source_id is not None:
         source = await session.get(SheetSource, scenario.sheet_source_id)
         if source is None or not source.enabled:
@@ -1061,7 +1070,7 @@ async def assign_scenarist_without_moving_sheet_row(
                 ),
             )
         scenario.assigned_scenarist_id = assigned_scenarist_id
-        return False
+        return False, assigned_scenarist.full_name
 
     source = await exact_sheet_source_for_assignment(
         session,
@@ -1074,7 +1083,7 @@ async def assign_scenarist_without_moving_sheet_row(
     scenario.source_sheet_id = source.spreadsheet_id
     scenario.source_tab = source.source_tab
     scenario.source_row = None
-    return True
+    return True, assigned_scenarist.full_name
 
 
 @router.post("", response_model=ScenarioRead, status_code=status.HTTP_201_CREATED)
@@ -1097,6 +1106,11 @@ async def create_scenario(
         user,
         payload.assigned_scenarist_id,
         requested_scenarist,
+    )
+    assigned_scenarist_name = (
+        requested_scenarist.full_name
+        if requested_scenarist is not None
+        else user.full_name
     )
     sheet_source = await exact_sheet_source_for_assignment(
         session,
@@ -1132,7 +1146,7 @@ async def create_scenario(
             scenario_create_writeback(
                 payload,
                 scenario.external_id,
-                assigned_scenarist_id,
+                assigned_scenarist_name,
             ),
         )
         await session.commit()
@@ -1338,10 +1352,14 @@ async def patch_scenario_sheet_row(
     publisher_status_changed = False
     publication_content_changed = False
     sheet_source_bound = False
+    assigned_scenarist_name: str | None = None
     for change in regular_changes:
         value = coerce_sheet_value(change.field, change.value)
         if change.field == "assigned_scenarist_id":
-            sheet_source_bound = await assign_scenarist_without_moving_sheet_row(
+            (
+                sheet_source_bound,
+                assigned_scenarist_name,
+            ) = await assign_scenarist_without_moving_sheet_row(
                 session,
                 scenario,
                 value,
@@ -1658,10 +1676,16 @@ async def patch_scenario_sheet_row(
 
     scenario.updated_at = datetime.now(UTC)
     writeback_changes = (
-        loaded_scenario_writeback(scenario)
+        loaded_scenario_writeback(
+            scenario,
+            scenarist_name=assigned_scenarist_name,
+        )
         if sheet_source_bound
         else {change.field: change.value for change in payload.changes}
     )
+    if assigned_scenarist_name is not None and not sheet_source_bound:
+        writeback_changes.pop("assigned_scenarist_id", None)
+        writeback_changes["scenarist.name"] = assigned_scenarist_name
     if source_material_changed:
         writeback_changes["montage.material_status"] = SourceMaterialStatus.DRAFT.value
     source_decision = approval_changes.get(ApprovalStage.SOURCE_MATERIAL, {}).get(
@@ -1727,6 +1751,7 @@ async def update_scenario(
     changes = payload.model_dump(exclude_unset=True, exclude={"research", "content"})
     writeback_changes = dict(changes)
     sheet_source_bound = False
+    assigned_scenarist_name: str | None = None
     if "assigned_scenarist_id" in changes:
         if user.role != Role.MANAGER:
             raise HTTPException(
@@ -1734,7 +1759,10 @@ async def update_scenario(
                 detail="Only manager can reassign a scenarist",
             )
         requested_scenarist_id = changes.pop("assigned_scenarist_id")
-        sheet_source_bound = await assign_scenarist_without_moving_sheet_row(
+        (
+            sheet_source_bound,
+            assigned_scenarist_name,
+        ) = await assign_scenarist_without_moving_sheet_row(
             session,
             scenario,
             requested_scenarist_id,
@@ -1764,7 +1792,13 @@ async def update_scenario(
             scenario.status = ScenarioStatus.DRAFT
 
     if sheet_source_bound:
-        writeback_changes = loaded_scenario_writeback(scenario)
+        writeback_changes = loaded_scenario_writeback(
+            scenario,
+            scenarist_name=assigned_scenarist_name,
+        )
+    elif assigned_scenarist_name is not None:
+        writeback_changes.pop("assigned_scenarist_id", None)
+        writeback_changes["scenarist.name"] = assigned_scenarist_name
     scenario.updated_at = datetime.now(UTC)
     await enqueue_sheet_writeback(session, scenario, writeback_changes)
     await session.commit()

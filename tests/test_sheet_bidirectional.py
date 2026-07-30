@@ -295,7 +295,6 @@ def test_new_sheet_row_places_fields_and_identity_in_sparse_columns():
 
 
 def test_create_writeback_is_built_from_payload_without_lazy_relationship_reads():
-    assigned_scenarist_id = uuid.uuid4()
     payload = ScenarioCreate(
         project_id=uuid.uuid4(),
         scenario_type="Экспертный",
@@ -308,15 +307,33 @@ def test_create_writeback_is_built_from_payload_without_lazy_relationship_reads(
     values = scenario_routes.scenario_create_writeback(
         payload,
         "124",
-        assigned_scenarist_id,
+        "Тестовый сценарист",
     )
 
     assert values["external_id"] == "124"
-    assert values["assigned_scenarist_id"] == assigned_scenarist_id
+    assert values["scenarist.name"] == "Тестовый сценарист"
+    assert "assigned_scenarist_id" not in values
     assert values["scenario_type"] == "Экспертный"
     assert values["content.cover_text"] == "Новая строка"
     assert values["content.script_text"] == "Полный текст"
     assert "deadline" not in values
+
+
+def test_loaded_writeback_uses_scenarist_name_instead_of_uuid():
+    scenario = SimpleNamespace(
+        approvals=[],
+        external_id="125",
+        assigned_scenarist_id=uuid.uuid4(),
+    )
+
+    values = scenario_routes.loaded_scenario_writeback(
+        scenario,
+        scenarist_name="Сценарист для таблицы",
+    )
+
+    assert values["external_id"] == "125"
+    assert values["scenarist.name"] == "Сценарист для таблицы"
+    assert "assigned_scenarist_id" not in values
 
 
 @pytest.mark.parametrize(
