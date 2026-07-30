@@ -62,6 +62,7 @@ from crm.sheet_sync import (
     WRITEBACK_FIELDS,
     column_letters,
     enqueue_redis,
+    process_inbound_event,
     source_metadata_matches,
     source_webhook_secret,
     validate_column_map,
@@ -291,6 +292,7 @@ async def receive_sheet_webhook(
             status=existing.status,
             duplicate=True,
             queued=False,
+            error=existing.error,
         )
     event = SheetInboundEvent(
         event_id=payload.event_id,
@@ -324,13 +326,26 @@ async def receive_sheet_webhook(
             status=existing.status,
             duplicate=True,
             queued=False,
+            error=existing.error,
         )
-    queued = await enqueue_redis(settings, "crm:sheet:inbound", event.id)
+
+    # Apply the event before acknowledging it. PostgreSQL remains the durable
+    # queue, while the inline path keeps Sheets sync correct even if Redis is
+    # absent or the optional worker process has restarted.
+    try:
+        processed = await process_inbound_event(session, event.id)
+        await session.commit()
+        await session.refresh(processed)
+    except Exception:
+        await session.rollback()
+        await enqueue_redis(settings, "crm:sheet:inbound", event.id)
+        raise
     return SheetWebhookAccepted(
-        event_id=event.event_id,
-        status=event.status,
+        event_id=processed.event_id,
+        status=processed.status,
         duplicate=False,
-        queued=queued,
+        queued=False,
+        error=processed.error,
     )
 
 

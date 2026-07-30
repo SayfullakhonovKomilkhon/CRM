@@ -291,6 +291,7 @@ class SheetWebhookAccepted(BaseModel):
     status: SheetEventStatus
     duplicate: bool
     queued: bool
+    error: str | None = None
 
 
 class SheetInboundEventRead(ORMModel):

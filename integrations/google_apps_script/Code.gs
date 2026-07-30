@@ -11,13 +11,18 @@
  */
 
 const CRM_SCHEMA_VERSION = 1;
+const CRM_RECONCILE_HANDLER = "reconcileCrmRows";
+const CRM_RECONCILE_DEFAULT_BATCH_SIZE = 100;
+const CRM_REALTIME_EXCLUDED_FIELDS = new Set(["montage.material_status"]);
 
 function installCrmSync() {
   const spreadsheet = SpreadsheetApp.getActive();
   ScriptApp.getProjectTriggers()
-    .filter((trigger) => trigger.getHandlerFunction() === "onCrmEdit")
+    .filter((trigger) => ["onCrmEdit", CRM_RECONCILE_HANDLER]
+      .includes(trigger.getHandlerFunction()))
     .forEach((trigger) => ScriptApp.deleteTrigger(trigger));
   ScriptApp.newTrigger("onCrmEdit").forSpreadsheet(spreadsheet).onEdit().create();
+  ScriptApp.newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5).create();
 }
 
 function onCrmEdit(event) {
@@ -35,58 +40,157 @@ function onCrmEdit(event) {
   const rowIdColumn = columnNumber_(props.getProperty("CRM_ROW_ID_COLUMN") || "A");
   const firstRow = Math.max(event.range.getRow(), headerRow + 1);
   const lastRow = event.range.getLastRow();
-  const firstColumn = event.range.getColumn();
-  const columnCount = event.range.getNumColumns();
-  const values = sheet.getRange(
-    firstRow,
-    firstColumn,
-    lastRow - firstRow + 1,
-    columnCount
-  ).getDisplayValues();
+  const editedColumns = new Set(Array.from(
+    {length: event.range.getNumColumns()},
+    (_, offset) => String(event.range.getColumn() + offset)
+  ));
+  const touchesMappedColumn = Object.keys(map).some(
+    (column) => editedColumns.has(column) && !CRM_REALTIME_EXCLUDED_FIELDS.has(map[column])
+  );
+  if (!touchesMappedColumn) return;
 
-  for (let rowOffset = 0; rowOffset < values.length; rowOffset += 1) {
-    const rowNumber = firstRow + rowOffset;
+  const spreadsheetId = event.source.getId();
+  for (let rowNumber = firstRow; rowNumber <= lastRow; rowNumber += 1) {
     const suppressionKey = `crm-origin:${sheet.getSheetId()}:${rowNumber}`;
     if (CacheService.getScriptCache().get(suppressionKey)) continue;
-    const changedFields = {};
-    for (let columnOffset = 0; columnOffset < columnCount; columnOffset += 1) {
-      const field = map[String(firstColumn + columnOffset)];
-      if (field) changedFields[field] = values[rowOffset][columnOffset] || null;
-    }
-    if (Object.keys(changedFields).length === 0) continue;
-
-    const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
-    const rowIdValue = rowIdCell.getValue();
-    let rowId = typeof rowIdValue === "string" ? rowIdValue.trim() : "";
-    if (!isUuid_(rowId)) {
-      rowId = Utilities.getUuid();
-      // A newly appended service column can inherit checkbox validation from
-      // its left neighbour. Remove validation only from this identity cell so
-      // FALSE/TRUE can never become a shared CRM row identifier.
-      rowIdCell.clearDataValidations();
-      rowIdCell.setValue(rowId);
-    }
-    const payload = {
-      event_id: Utilities.getUuid(),
-      schema_version: CRM_SCHEMA_VERSION,
-      row_id: rowId,
-      row_number: rowNumber,
-      changed_fields: changedFields,
-      raw: {
-        spreadsheet_id: event.source.getId(),
-        tab: sheet.getName(),
-        a1: event.range.getA1Notation()
-      },
-      checksum: sha256Hex_(stableJson_(changedFields)),
-      origin: "sheets",
-      correlation_id: null
-    };
-    postSigned_(
-      props.getProperty("CRM_WEBHOOK_URL"),
-      props.getProperty("CRM_WEBHOOK_SECRET"),
-      payload
-    );
+    syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, {
+      force: true,
+      a1: event.range.getA1Notation()
+    });
   }
+}
+
+/**
+ * Recovery for pasted rows, formulas, imports and temporary webhook failures.
+ * It scans a bounded batch every five minutes and only sends changed snapshots.
+ */
+function reconcileCrmRows() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const spreadsheet = SpreadsheetApp.getActive();
+    const sourceTab = props.getProperty("CRM_SOURCE_TAB");
+    const sheet = sourceTab ? spreadsheet.getSheetByName(sourceTab) : null;
+    if (!sheet) return;
+    const headerRow = Number(props.getProperty("CRM_HEADER_ROW") || "1");
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= headerRow) return;
+    const map = JSON.parse(props.getProperty("CRM_INBOUND_COLUMN_MAP") || "{}");
+    const rowIdColumn = columnNumber_(props.getProperty("CRM_ROW_ID_COLUMN") || "A");
+    const configuredBatch = Number(
+      props.getProperty("CRM_RECONCILE_BATCH_SIZE") || CRM_RECONCILE_DEFAULT_BATCH_SIZE
+    );
+    const batchSize = Math.max(1, Math.min(500, configuredBatch || 0));
+    let cursor = Number(props.getProperty("CRM_RECONCILE_CURSOR") || headerRow + 1);
+    if (cursor <= headerRow || cursor > lastRow) cursor = headerRow + 1;
+    const endRow = Math.min(lastRow, cursor + batchSize - 1);
+    const claimedRowIds = {};
+
+    for (let rowNumber = cursor; rowNumber <= endRow; rowNumber += 1) {
+      syncCrmRow_(
+        sheet,
+        rowNumber,
+        map,
+        rowIdColumn,
+        props,
+        spreadsheet.getId(),
+        {force: false, a1: `${rowNumber}:${rowNumber}`, claimedRowIds}
+      );
+    }
+    props.setProperty(
+      "CRM_RECONCILE_CURSOR",
+      String(endRow >= lastRow ? headerRow + 1 : endRow + 1)
+    );
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, options) {
+  const fields = fullRowFields_(sheet, rowNumber, map);
+  const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
+  const rawRowId = rowIdCell.getDisplayValue().trim();
+  const hasExistingIdentity = isUuid_(rawRowId);
+  if (!hasExistingIdentity && !hasMeaningfulFields_(fields)) return false;
+
+  let rowId = rawRowId;
+  const claimed = options.claimedRowIds || null;
+  if (!hasExistingIdentity || (claimed && claimed[rowId])) {
+    rowId = Utilities.getUuid();
+    // The service column may inherit checkbox validation from its neighbour.
+    rowIdCell.clearDataValidations();
+    rowIdCell.setValue(rowId);
+  }
+  if (claimed) claimed[rowId] = true;
+
+  const checksum = sha256Hex_(stableJson_(fields));
+  const checksumKey = syncChecksumKey_(sheet.getSheetId(), rowId);
+  if (!options.force && props.getProperty(checksumKey) === checksum) return false;
+  const payload = {
+    event_id: Utilities.getUuid(),
+    schema_version: CRM_SCHEMA_VERSION,
+    row_id: rowId,
+    row_number: rowNumber,
+    changed_fields: fields,
+    raw: {
+      spreadsheet_id: spreadsheetId,
+      tab: sheet.getName(),
+      a1: options.a1
+    },
+    checksum,
+    origin: "sheets",
+    correlation_id: null
+  };
+  const response = postSigned_(
+    props.getProperty("CRM_WEBHOOK_URL"),
+    props.getProperty("CRM_WEBHOOK_SECRET"),
+    payload
+  );
+  if (response && response.status === "failed") {
+    throw new Error(response.error || "CRM rejected the row");
+  }
+  props.setProperty(checksumKey, checksum);
+  return true;
+}
+
+function fullRowFields_(sheet, rowNumber, map) {
+  const columns = Object.keys(map)
+    .map(Number)
+    .filter((column) => Number.isFinite(column))
+    .sort((left, right) => left - right);
+  if (columns.length === 0) return {};
+  const firstColumn = columns[0];
+  const lastColumn = columns[columns.length - 1];
+  const values = sheet.getRange(
+    rowNumber,
+    firstColumn,
+    1,
+    lastColumn - firstColumn + 1
+  ).getDisplayValues()[0];
+  const fields = {};
+  columns.forEach((column) => {
+    const field = map[String(column)];
+    if (!field || CRM_REALTIME_EXCLUDED_FIELDS.has(field)) return;
+    const value = values[column - firstColumn];
+    fields[field] = value === "" ? null : value;
+  });
+  return fields;
+}
+
+function hasMeaningfulFields_(fields) {
+  return Object.values(fields).some((value) => {
+    if (value === null || value === undefined) return false;
+    const normalized = String(value).trim().toLowerCase();
+    return normalized !== "" &&
+      normalized !== "false" &&
+      normalized !== "—" &&
+      normalized !== "-";
+  });
+}
+
+function syncChecksumKey_(sheetId, rowId) {
+  return `CRM_SYNC_${sheetId}_${rowId}`;
 }
 
 function postSigned_(url, secret, payload) {
@@ -94,7 +198,7 @@ function postSigned_(url, secret, payload) {
   const body = JSON.stringify(payload);
   const timestamp = String(Math.floor(Date.now() / 1000));
   const signature = hmacHex_(secret, `${timestamp}.${body}`);
-  UrlFetchApp.fetch(url, {
+  const response = UrlFetchApp.fetch(url, {
     method: "post",
     contentType: "application/json",
     payload: body,
@@ -104,6 +208,8 @@ function postSigned_(url, secret, payload) {
     },
     muteHttpExceptions: false
   });
+  const text = response.getContentText();
+  return text ? JSON.parse(text) : null;
 }
 
 function markCrmOrigin_(sheetId, rowNumber, ttlSeconds) {

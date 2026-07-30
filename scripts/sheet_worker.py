@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import or_, select
@@ -13,6 +14,8 @@ from crm.models import (
     SheetWritebackStatus,
 )
 from crm.sheet_sync import dequeue_redis, process_inbound_event, process_writeback_event
+
+logger = logging.getLogger(__name__)
 
 
 async def run_once() -> bool:
@@ -71,29 +74,37 @@ async def run_once() -> bool:
 
 async def main() -> None:
     while True:
-        queued = await dequeue_redis(
-            settings,
-            ("crm:sheet:inbound", "crm:sheet:writeback"),
-            timeout_seconds=2,
-        )
-        if queued is not None:
-            queue, event_id = queued
-            async with SessionLocal() as session:
-                if queue == "crm:sheet:inbound":
-                    await process_inbound_event(session, event_id)
-                else:
-                    await process_writeback_event(
-                        session,
-                        event_id,
-                        google_sheets_client(settings),
-                        max_retries=settings.sheet_google_max_retries,
-                    )
-                await session.commit()
-            continue
-        # PostgreSQL is authoritative. Polling recovers missed Redis notifications
-        # and processes transactional outbox rows created before/without Redis.
-        if not await run_once():
-            await asyncio.sleep(1)
+        try:
+            queued = await dequeue_redis(
+                settings,
+                ("crm:sheet:inbound", "crm:sheet:writeback"),
+                timeout_seconds=2,
+            )
+            if queued is not None:
+                queue, event_id = queued
+                async with SessionLocal() as session:
+                    if queue == "crm:sheet:inbound":
+                        await process_inbound_event(session, event_id)
+                    else:
+                        await process_writeback_event(
+                            session,
+                            event_id,
+                            google_sheets_client(settings),
+                            max_retries=settings.sheet_google_max_retries,
+                        )
+                    await session.commit()
+                continue
+            # PostgreSQL is authoritative. Polling recovers missed Redis
+            # notifications and processes events created before/without Redis.
+            if not await run_once():
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # The API container must not silently lose its background worker
+            # after one malformed row or transient database/network failure.
+            logger.exception("Sheets worker iteration failed")
+            await asyncio.sleep(2)
 
 
 if __name__ == "__main__":

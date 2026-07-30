@@ -1,6 +1,7 @@
 import inspect
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -117,6 +118,33 @@ def test_inbound_values_use_scenario_validation_before_mutation():
     with pytest.raises(ValidationError, match="less than or equal to 100"):
         _set_values(value, {"score": 101})
     assert value.score is None
+
+
+def test_partial_sheet_row_can_create_and_later_clear_one_field():
+    value = Scenario(
+        project_id=uuid.uuid4(),
+        assigned_scenarist_id=uuid.uuid4(),
+    )
+
+    _set_values(value, {"speaker": "Только спикер заполнен"})
+    assert value.speaker == "Только спикер заполнен"
+    assert value.content is None
+    assert value.research is None
+
+    _set_values(value, {"speaker": None})
+    assert value.speaker is None
+
+
+def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
+    script = (
+        Path(__file__).parents[1] / "integrations/google_apps_script/Code.gs"
+    ).read_text()
+
+    assert "fullRowFields_" in script
+    assert "hasMeaningfulFields_" in script
+    assert 'new Set(["montage.material_status"])' in script
+    assert 'newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5)' in script
+    assert 'response.status === "failed"' in script
 
 
 def test_inbound_workflow_statuses_are_coerced_and_applied():
@@ -540,6 +568,8 @@ def test_openapi_documents_management_webhook_and_event_contracts():
     body_schema = webhook["requestBody"]["content"]["application/json"]["schema"]
     assert body_schema["$ref"].endswith("/SheetWebhookEvent")
     assert "202" in webhook["responses"]
+    accepted_schema = app.openapi()["components"]["schemas"]["SheetWebhookAccepted"]
+    assert "error" in accepted_schema["properties"]
     assert "/api/v1/google-sheets/inbound-events" in paths
     assert "/api/v1/google-sheets/writeback-events" in paths
 
