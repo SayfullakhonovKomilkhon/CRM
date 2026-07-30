@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from crm.models import Role
 from crm.routers.catalog import (
     ensure_active_admin_remains,
+    ensure_user_creation_allowed,
     require_catalog_reader,
     resolve_user_client_id,
 )
@@ -173,3 +174,48 @@ def test_admin_payload_accepts_both_specialized_manager_roles() -> None:
             password="password8",
         )
         assert payload.role == role
+
+
+def test_admin_can_create_any_team_role() -> None:
+    for role in Role:
+        ensure_user_creation_allowed(Role.ADMIN, role, admin_exists=True)
+
+
+def test_scenario_manager_can_create_scenarist() -> None:
+    ensure_user_creation_allowed(
+        Role.MANAGER,
+        Role.SCENARIST,
+        admin_exists=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        Role.MANAGER,
+        Role.EDITOR_MANAGER,
+        Role.PUBLISHER_MANAGER,
+        Role.EDITOR,
+        Role.CLIENT,
+        Role.PUBLISHER,
+        Role.ADMIN,
+    ],
+)
+def test_scenario_manager_cannot_create_other_roles_when_admin_exists(
+    role: Role,
+) -> None:
+    with pytest.raises(HTTPException) as error:
+        ensure_user_creation_allowed(
+            Role.MANAGER,
+            role,
+            admin_exists=True,
+        )
+    assert error.value.status_code == 403
+
+
+def test_first_admin_bootstrap_remains_available_to_manager() -> None:
+    ensure_user_creation_allowed(
+        Role.MANAGER,
+        Role.ADMIN,
+        admin_exists=False,
+    )

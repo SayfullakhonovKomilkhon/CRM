@@ -115,11 +115,14 @@ cross-user assignment during scenarist-created rows, `404` for a missing referen
 and `409` for an inactive entity, wrong assignment role, or duplicate business identifier.
 `POST /scenarios` never accepts a caller-provided scenario `external_id`.
 
-## Manager catalogs
+## Administration catalogs
 
-Only managers can create and update users, clients, and projects. `GET /users` supports
-`role` and `active_only` filters; `GET /clients` and `GET /projects` support
-`active_only=false` for archive screens.
+Administrators can create and update users, clients, and projects. Scenario managers may
+list scenario users and create new users only with the `scenarist` role. The server enforces
+this restriction even if a manager sends another role manually. `GET /users` supports
+`role` and `active_only` filters for administrators and always projects only scenarists for
+scenario managers. `GET /clients` and `GET /projects` support `active_only=false` for archive
+screens.
 
 The full client and project catalogs are readable by all three manager levels and scenarists.
 Client users receive only their own client and projects. Editors and publishers receive
@@ -129,7 +132,7 @@ User creation accepts `email`, `full_name`, `role`, optional `client_id`, and a 
 least eight characters. A `client` user must reference an active client. Internal roles must
 have `client_id=null`. `PATCH /users/{id}` can update the name, role, client assignment, active
 state, or password. The backend transactionally prevents deactivating or demoting the last
-active manager account.
+active administrator account.
 
 Client updates accept `name`, `external_id`, and `is_active`. Project updates accept `name`,
 `external_name`, and `is_active`. Duplicate names and identifiers return `409`; missing rows

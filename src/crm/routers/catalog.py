@@ -251,13 +251,46 @@ def ensure_active_admin_remains(
         )
 
 
+def ensure_user_creation_allowed(
+    actor_role: Role,
+    requested_role: Role,
+    *,
+    admin_exists: bool,
+) -> None:
+    if actor_role == Role.ADMIN:
+        return
+    if actor_role == Role.MANAGER and requested_role == Role.SCENARIST:
+        return
+    if (
+        actor_role == Role.MANAGER
+        and requested_role == Role.ADMIN
+        and not admin_exists
+    ):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "A scenario manager can create scenarists only"
+            if actor_role == Role.MANAGER
+            else "Only an administrator can create users"
+        ),
+    )
+
+
 @router.get("/users", response_model=list[UserAdminRead])
 async def list_users(
     role: Role | None = None,
     active_only: bool = True,
-    _: User = Depends(require_roles(Role.ADMIN)),
+    actor: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
+    if actor.role == Role.MANAGER:
+        if role not in (None, Role.SCENARIST):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="A scenario manager can list scenarists only",
+            )
+        role = Role.SCENARIST
     query = select(User).order_by(User.full_name, User.email)
     if role is not None:
         query = query.where(User.role == role)
@@ -272,19 +305,16 @@ async def create_user(
     actor: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> User:
+    existing_admin = None
     if actor.role != Role.ADMIN:
         existing_admin = await session.scalar(
             select(User.id).where(User.role == Role.ADMIN).limit(1)
         )
-        if (
-            actor.role != Role.MANAGER
-            or payload.role != Role.ADMIN
-            or existing_admin is not None
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only an administrator can create users",
-            )
+    ensure_user_creation_allowed(
+        actor.role,
+        payload.role,
+        admin_exists=existing_admin is not None,
+    )
     email = str(payload.email).lower()
     duplicate = await session.scalar(
         select(User.id).where(func.lower(User.email) == email)
