@@ -208,20 +208,6 @@ SHEET_FIELDS = (
         "montage.ready_at", "Дата готового монтажа", "Результат монтажа", PRODUCTION_ROLES, "inline"
     ),
     field(
-        "approval.montage_compliance.decision",
-        "Решение менеджера по монтажу",
-        "Проверка",
-        PRODUCTION_ROLES,
-        "inline",
-    ),
-    field(
-        "approval.montage_compliance.comment",
-        "Комментарий к решению",
-        "Проверка",
-        PRODUCTION_ROLES,
-        "inline",
-    ),
-    field(
         "montage.brief_compliance_status",
         "Статус проверки по ТЗ",
         "Проверка",
@@ -258,6 +244,20 @@ SHEET_FIELDS = (
         "Проверка",
         PRODUCTION_ROLES,
         "detail",
+    ),
+    field(
+        "approval.montage_compliance.decision",
+        "Проверка монтажа по ТЗ",
+        "Проверка",
+        PRODUCTION_ROLES,
+        "inline",
+    ),
+    field(
+        "approval.montage_compliance.comment",
+        "Комментарий менеджера",
+        "Проверка",
+        PRODUCTION_ROLES,
+        "inline",
     ),
     field(
         "approval.final_client.decision",
@@ -456,6 +456,13 @@ SHEET_FIELDS = (
         "Публикация",
         INTERNAL_ROLES,
         "detail",
+    ),
+    field(
+        "publication.preparation_status",
+        "Статус подготовки публикации",
+        "Публикация",
+        INTERNAL_ROLES,
+        "inline",
     ),
 )
 

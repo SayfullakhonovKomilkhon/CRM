@@ -85,6 +85,13 @@ class PublicationReviewDecision(StrEnum):
     REVISION = "revision"
 
 
+class PublicationPreparationStatus(StrEnum):
+    DRAFT = "draft"
+    READY_FOR_REVIEW = "ready_for_review"
+    REVISION = "revision"
+    APPROVED = "approved"
+
+
 class PublisherStatus(StrEnum):
     PENDING = "pending"
     ASSIGNED = "assigned"
@@ -531,6 +538,12 @@ class Publication(TimestampMixin, Base):
     is_published: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     first_published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    preparation_status: Mapped[str] = mapped_column(
+        String(32),
+        default=PublicationPreparationStatus.DRAFT.value,
+        server_default=PublicationPreparationStatus.DRAFT.value,
+        index=True,
     )
     assigned_publisher_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id"), nullable=True, index=True

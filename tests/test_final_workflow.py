@@ -8,6 +8,7 @@ from crm.models import (
     ApprovalDecision,
     ApprovalStage,
     GateDecision,
+    PublicationPreparationStatus,
     PublicationReviewDecision,
     PublisherStatus,
     Role,
@@ -58,6 +59,7 @@ def publication(**updates):
         "description_youtube": None,
         "description_tiktok": None,
         "description_instagram": None,
+        "preparation_status": PublicationPreparationStatus.READY_FOR_REVIEW,
         "manager_review_decision": PublicationReviewDecision.PENDING,
         "manager_review_comment": None,
         "manager_reviewed_by_id": None,
@@ -159,6 +161,10 @@ async def test_manager_approves_publication_and_assigns_active_publisher() -> No
     )
 
     assert scenario.publication.assigned_publisher_id == assigned_publisher.id
+    assert (
+        scenario.publication.preparation_status
+        == PublicationPreparationStatus.APPROVED
+    )
     assert scenario.publication.publisher_status == PublisherStatus.ASSIGNED
     assert scenario.status == ScenarioStatus.READY_TO_PUBLISH
 

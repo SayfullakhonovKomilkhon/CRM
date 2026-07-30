@@ -111,18 +111,6 @@ def test_sheet_registry_contains_every_persisted_workflow_field() -> None:
     assert expected <= columns
 
 
-def test_montage_manager_decision_leads_the_check_group() -> None:
-    check_fields = [
-        column.field
-        for column in columns_for_role(Role.EDITOR_MANAGER)
-        if column.group == "Проверка"
-    ]
-    assert check_fields[:2] == [
-        "approval.montage_compliance.decision",
-        "approval.montage_compliance.comment",
-    ]
-
-
 def test_source_material_status_is_server_controlled_for_scenarist() -> None:
     assert "montage.material_status" not in SCENARIST_SOURCE_FIELDS
     assert "material_status" not in API_SCENARIST_MONTAGE_FIELDS

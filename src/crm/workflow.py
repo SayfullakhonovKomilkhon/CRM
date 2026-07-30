@@ -3,6 +3,7 @@ from fastapi import HTTPException, status
 from crm.models import (
     ApprovalDecision,
     ApprovalStage,
+    PublicationPreparationStatus,
     PublicationReviewDecision,
     PublisherStatus,
     Role,
@@ -82,6 +83,9 @@ def _reset_approval(approval) -> None:
 
 def _unpublish(scenario: Scenario) -> None:
     if scenario.publication is not None:
+        scenario.publication.preparation_status = (
+            PublicationPreparationStatus.DRAFT.value
+        )
         scenario.publication.is_published = False
         scenario.publication.published_at = None
         scenario.publication.manager_review_decision = PublicationReviewDecision.PENDING

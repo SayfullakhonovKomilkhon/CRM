@@ -13,6 +13,7 @@ from crm.models import (
     GateDecision,
     GoogleSheetsSyncMode,
     GoogleSheetsSyncStatus,
+    PublicationPreparationStatus,
     PublicationReviewDecision,
     PublisherStatus,
     Role,
@@ -647,6 +648,7 @@ class PublicationRead(ORMModel):
     publication_date: date | None
     is_published: bool
     first_published_at: datetime | None
+    preparation_status: PublicationPreparationStatus = PublicationPreparationStatus.DRAFT
     assigned_publisher_id: uuid.UUID | None
     assigned_publisher_name: str | None
     manager_review_decision: PublicationReviewDecision

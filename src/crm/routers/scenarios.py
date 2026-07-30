@@ -27,6 +27,7 @@ from crm.models import (
     MontageTask,
     Project,
     Publication,
+    PublicationPreparationStatus,
     PublicationReviewDecision,
     PublisherStatus,
     Role,
@@ -216,6 +217,7 @@ def publication_content_ready(publication: Publication | None) -> bool:
 
 
 def reset_publication_review(publication: Publication) -> None:
+    publication.preparation_status = PublicationPreparationStatus.DRAFT.value
     publication.manager_review_decision = PublicationReviewDecision.PENDING
     publication.manager_review_comment = None
     publication.manager_reviewed_by_id = None
@@ -307,6 +309,14 @@ async def apply_publication_manager_review(
             detail="At least one publication description is required",
         )
     publication = scenario.publication
+    if (
+        publication.preparation_status
+        != PublicationPreparationStatus.READY_FOR_REVIEW
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The scenarist must submit publication content first",
+        )
     publication.manager_review_decision = PublicationReviewDecision(decision.value)
     publication.manager_review_comment = comment
     publication.manager_reviewed_by_id = manager.id
@@ -323,10 +333,12 @@ async def apply_publication_manager_review(
             await session.get(User, assigned_publisher_id)
         )
         publication.assigned_publisher_id = publisher.id
+        publication.preparation_status = PublicationPreparationStatus.APPROVED.value
         publication.publisher_status = PublisherStatus.ASSIGNED
         scenario.status = ScenarioStatus.READY_TO_PUBLISH
     else:
         publication.assigned_publisher_id = None
+        publication.preparation_status = PublicationPreparationStatus.REVISION.value
         publication.publisher_status = PublisherStatus.PENDING
         scenario.status = ScenarioStatus.APPROVED
     return publication
@@ -511,12 +523,8 @@ def queue_filter(queue: ScenarioQueue, user: User):
             and_(
                 Publication.manager_review_decision
                 == PublicationReviewDecision.PENDING,
-                or_(
-                    func.nullif(Publication.description_dzen, "").is_not(None),
-                    func.nullif(Publication.description_youtube, "").is_not(None),
-                    func.nullif(Publication.description_tiktok, "").is_not(None),
-                    func.nullif(Publication.description_instagram, "").is_not(None),
-                ),
+                Publication.preparation_status
+                == PublicationPreparationStatus.READY_FOR_REVIEW.value,
             )
         )
         return and_(
@@ -1171,6 +1179,7 @@ async def patch_scenario_sheet_row(
     source_material_changed = False
     ready_material_changed = False
     publisher_status_changed = False
+    publication_content_changed = False
     for change in regular_changes:
         value = coerce_sheet_value(change.field, change.value)
         if change.field == "assigned_scenarist_id":
@@ -1215,6 +1224,19 @@ async def patch_scenario_sheet_row(
         publisher_status_changed |= (
             change.field == "publication.publisher_status" and old_value != value
         )
+        publication_content_changed |= (
+            target_name == "publication"
+            and change.field in {
+                "publication.publisher_brief",
+                "publication.description_dzen",
+                "publication.description_youtube",
+                "publication.description_tiktok",
+                "publication.description_instagram",
+                "publication.ai_social_descriptions",
+                "publication.leia_script",
+            }
+            and old_value != value
+        )
         setattr(target, attribute, value)
 
     if script_changed:
@@ -1237,6 +1259,9 @@ async def patch_scenario_sheet_row(
             if is_approved(scenario, ApprovalStage.SOURCE_MATERIAL)
             else status_after_unpublishing(scenario)
         )
+    if publication_content_changed and scenario.publication is not None:
+        reset_publication_review(scenario.publication)
+        scenario.status = ScenarioStatus.APPROVED
 
     stage_order = [
         ApprovalStage.RESPONSIBLE_REVIEW,
@@ -2023,6 +2048,65 @@ async def update_publication(
     await session.commit()
     await session.refresh(scenario.publication)
     return scenario.publication
+
+
+@router.post("/{scenario_id}/publication/submit", response_model=ScenarioRead)
+async def submit_publication_for_review(
+    scenario_id: uuid.UUID,
+    user: User = Depends(require_roles(Role.SCENARIST)),
+    session: AsyncSession = Depends(get_session),
+) -> ScenarioRead:
+    """Explicitly send one scenario's publication package to the publisher manager."""
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+    if scenario.assigned_scenarist_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the assigned scenarist can submit publication content",
+        )
+    if not is_approved(scenario, ApprovalStage.FINAL_CLIENT):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The client must approve the final montage first",
+        )
+    if scenario.status != ScenarioStatus.APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Publication content is not waiting for scenarist submission",
+        )
+    publication = scenario.publication
+    if not publication_content_ready(publication):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="At least one publication description is required",
+        )
+    if publication.preparation_status == PublicationPreparationStatus.READY_FOR_REVIEW:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Publication content has already been submitted",
+        )
+    if publication.preparation_status == PublicationPreparationStatus.APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Publication content has already been approved",
+        )
+
+    publication.preparation_status = (
+        PublicationPreparationStatus.READY_FOR_REVIEW.value
+    )
+    publication.manager_review_decision = PublicationReviewDecision.PENDING
+    publication.manager_review_comment = None
+    publication.manager_reviewed_by_id = None
+    publication.manager_reviewed_at = None
+    publication.assigned_publisher_id = None
+    publication.publisher_status = PublisherStatus.PENDING
+    scenario.updated_at = datetime.now(UTC)
+    await session.commit()
+    updated = await session.scalar(
+        select(Scenario).where(Scenario.id == scenario.id).options(*LOAD_SCENARIO)
+    )
+    if updated is None:  # pragma: no cover
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scenario not found")
+    return scenario_for_role(updated, user)
 
 
 @router.put(
