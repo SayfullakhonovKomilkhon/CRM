@@ -100,7 +100,7 @@ def _protect_identity_column(values: dict) -> None:
 
 @router.get("/sources", response_model=list[SheetSourceRead])
 async def list_sheet_sources(
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> list[SheetSource]:
     return list(
@@ -121,7 +121,7 @@ async def list_sheet_sources(
 )
 async def create_sheet_source(
     payload: SheetSourceCreate,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> SheetSourceCreated:
@@ -158,7 +158,7 @@ async def create_sheet_source(
 @router.get("/sources/{source_id}", response_model=SheetSourceRead)
 async def get_sheet_source(
     source_id: uuid.UUID,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> SheetSource:
     source = await session.get(SheetSource, source_id)
@@ -171,7 +171,7 @@ async def get_sheet_source(
 async def update_sheet_source(
     source_id: uuid.UUID,
     payload: SheetSourceUpdate,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> SheetSource:
     source = await session.get(SheetSource, source_id)
@@ -216,7 +216,7 @@ async def update_sheet_source(
 @router.delete("/sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def disable_sheet_source(
     source_id: uuid.UUID,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Soft-delete a source so event history and scenario identity remain auditable."""
@@ -231,7 +231,7 @@ async def disable_sheet_source(
 @router.post("/sources/{source_id}/rotate-secret", response_model=SheetSourceCreated)
 async def rotate_sheet_source_secret(
     source_id: uuid.UUID,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> SheetSourceCreated:
@@ -338,7 +338,7 @@ async def receive_sheet_webhook(
 async def list_inbound_events(
     source_id: uuid.UUID | None = None,
     limit: int = Query(100, ge=1, le=500),
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> list[SheetInboundEvent]:
     query = select(SheetInboundEvent)
@@ -357,7 +357,7 @@ async def list_inbound_events(
 async def list_writeback_events(
     source_id: uuid.UUID | None = None,
     limit: int = Query(100, ge=1, le=500),
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> list[SheetWritebackEvent]:
     query = select(SheetWritebackEvent)
@@ -376,7 +376,7 @@ async def list_writeback_events(
 async def reconcile_sheet_source(
     source_id: uuid.UUID,
     payload: SheetReconcileRequest,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> SheetReconcileRead:
@@ -550,7 +550,7 @@ async def _registered_source(
 
 @router.get("/status", response_model=GoogleSheetsStatusRead)
 async def google_sheets_status(
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> GoogleSheetsStatusRead:
@@ -584,7 +584,7 @@ async def google_sheets_status(
 @router.post("/preview", response_model=GoogleSheetsPreviewRead)
 async def preview_google_sheets(
     payload: GoogleSheetsPreviewRequest,
-    actor: User = Depends(require_roles(Role.MANAGER)),
+    actor: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> GoogleSheetsPreviewRead:
@@ -633,7 +633,7 @@ async def preview_google_sheets(
 @router.post("/sync", response_model=GoogleSheetsSyncRead)
 async def sync_google_sheets(
     payload: GoogleSheetsSyncRequest,
-    actor: User = Depends(require_roles(Role.MANAGER)),
+    actor: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ) -> GoogleSheetsSyncRead:

@@ -18,6 +18,7 @@ Open:
 
 Demo accounts all use password `demo12345`:
 
+- `admin@crm.local`
 - `manager@crm.local`
 - `editor-manager@crm.local`
 - `publisher-manager@crm.local`

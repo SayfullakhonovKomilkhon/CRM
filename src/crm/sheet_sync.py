@@ -41,7 +41,7 @@ from crm.models import (
 )
 from crm.schemas import ScenarioCreate
 from crm.sheet import SHEET_FIELDS
-from crm.workflow import approval_for, reset_approvals_from
+from crm.workflow import approval_for
 
 WEBHOOK_SCHEMA_VERSION = 1
 SHEETS_ORIGIN = "sheets"
@@ -297,12 +297,6 @@ def _set_values(scenario: Scenario, changed_fields: dict[str, Any]) -> None:
         scenario.content = scenario.content or ScenarioContent()
         for field_name, value in content_values.items():
             setattr(scenario.content, field_name, value)
-        if "script_text" in content_values:
-            scenario.status = (
-                ScenarioStatus.IN_REVIEW
-                if content_values["script_text"]
-                else ScenarioStatus.DRAFT
-            )
     if workflow_values:
         _apply_workflow_values(scenario, _nested_payload(workflow_values))
 
@@ -331,20 +325,6 @@ def workflow_fields_only(changed_fields: dict[str, Any]) -> bool:
     return bool(changed_fields) and all(
         field_name.startswith(("approval.", "montage.", "publication."))
         for field_name in changed_fields
-    )
-
-
-def finalize_inbound_revision(
-    scenario: Scenario,
-    revision_stage: ApprovalStage | None,
-) -> None:
-    if revision_stage is None:
-        return
-    reset_approvals_from(scenario, revision_stage)
-    scenario.status = (
-        ScenarioStatus.IN_REVIEW
-        if scenario.content and scenario.content.script_text
-        else ScenarioStatus.DRAFT
     )
 
 
@@ -405,9 +385,6 @@ async def process_inbound_event(
         event.error = "Checksum already applied"
         event.processed_at = datetime.now(UTC)
         return event
-    revision_stage = (
-        active_scenarist_revision_stage(scenario) if scenario is not None else None
-    )
     if (
         scenario is not None
         and not inbound_update_allowed(scenario)
@@ -447,7 +424,6 @@ async def process_inbound_event(
         event.status = SheetEventStatus.FAILED
         event.error = f"Inbound validation failed: {error}"
         return event
-    finalize_inbound_revision(scenario, revision_stage)
     event.status = SheetEventStatus.COMPLETED
     event.error = None
     event.processed_at = datetime.now(UTC)

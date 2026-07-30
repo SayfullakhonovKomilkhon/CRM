@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -117,6 +117,7 @@ CLIENT_APPROVAL_STAGES = {
 
 REVISION_COMMENT_STAGES = {
     *CLIENT_APPROVAL_STAGES,
+    ApprovalStage.RESPONSIBLE_REVIEW,
     ApprovalStage.SOURCE_MATERIAL,
     ApprovalStage.MONTAGE_COMPLIANCE,
 }
@@ -357,6 +358,8 @@ def apply_publisher_action(
     return publication
 
 def apply_visibility(query, user: User):
+    if user.role == Role.ADMIN:
+        return query.where(false())
     if user.role == Role.SCENARIST:
         return query.where(
             or_(Scenario.assigned_scenarist_id == user.id, Scenario.assigned_scenarist_id.is_(None))
@@ -369,7 +372,22 @@ def apply_visibility(query, user: User):
     if user.role == Role.EDITOR_MANAGER:
         return query.where(Scenario.status.in_(EDITOR_MANAGER_VISIBLE_STATUSES))
     if user.role == Role.CLIENT:
-        return query.where(Scenario.project.has(Project.client_id == user.client_id))
+        return query.where(
+            Scenario.project.has(Project.client_id == user.client_id),
+            Scenario.status.in_(
+                {
+                    ScenarioStatus.CLIENT_REVIEW,
+                    ScenarioStatus.SENT_TO_GENERATION,
+                    ScenarioStatus.HANDED_TO_EDITOR,
+                    ScenarioStatus.EDITING,
+                    ScenarioStatus.MANAGER_REVISION_REVIEW,
+                    ScenarioStatus.APPROVED,
+                    ScenarioStatus.READY_TO_PUBLISH,
+                    ScenarioStatus.PUBLISHED,
+                    ScenarioStatus.ARCHIVED,
+                }
+            ),
+        )
     if user.role == Role.PUBLISHER:
         return query.where(
             Scenario.publication.has(Publication.assigned_publisher_id == user.id),
@@ -538,9 +556,9 @@ def scenario_for_role(scenario: Scenario, user: User) -> ScenarioRead:
     ]
 
     available_sections = ["content", "approvals"]
-    if script_approved or scenario.montage is not None:
+    if user.role != Role.MANAGER and (script_approved or scenario.montage is not None):
         available_sections.append("montage")
-    if publication_section_available(scenario):
+    if user.role != Role.MANAGER and publication_section_available(scenario):
         available_sections.append("publication")
     if user.role in {
         Role.MANAGER,
@@ -814,6 +832,7 @@ async def list_scenario_sheet(
         rows.append(
             SheetScenarioRow(
                 id=scenario.id,
+                status=scenario.status,
                 version=scenario.updated_at,
                 values=values_for_role(role_view, user.role),
                 editable_fields=editable_fields_for_role(role_view, user.role),
@@ -1186,11 +1205,8 @@ async def patch_scenario_sheet_row(
 
     if script_changed:
         reset_approvals_from(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
-        scenario.status = (
-            ScenarioStatus.IN_REVIEW
-            if scenario.content and scenario.content.script_text
-            else ScenarioStatus.DRAFT
-        )
+        if scenario.status != ScenarioStatus.REVISION:
+            scenario.status = ScenarioStatus.DRAFT
     if source_material_changed:
         reset_approvals_from(scenario, ApprovalStage.SOURCE_MATERIAL)
         scenario.status = (
@@ -1379,12 +1395,6 @@ async def patch_scenario_sheet_row(
     approval_decision_changed = any(
         field.startswith("approval.") and field.endswith(".decision") for field in fields
     )
-    if (
-        user.role == Role.SCENARIST
-        and scenario.status == ScenarioStatus.REVISION
-        and not approval_decision_changed
-    ):
-        scenario.status = ScenarioStatus.IN_REVIEW
     editor_result_changed = bool(
         {
             "montage.ready_material_url",
@@ -1475,6 +1485,15 @@ async def update_scenario(
 ) -> ScenarioRead:
     scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
 
+    if user.role == Role.SCENARIST and scenario.status not in {
+        ScenarioStatus.DRAFT,
+        ScenarioStatus.REVISION,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Scenario can be edited only before submission or after a revision request",
+        )
+
     if user.role == Role.MANAGER:
         denied_fields = sorted(payload.model_fields_set - {"assigned_scenarist_id"})
         if denied_fields:
@@ -1522,14 +1541,8 @@ async def update_scenario(
 
     if script_changed:
         reset_approvals_from(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
-        scenario.status = (
-            ScenarioStatus.IN_REVIEW
-            if scenario.content and scenario.content.script_text
-            else ScenarioStatus.DRAFT
-        )
-
-    if user.role == Role.SCENARIST and scenario.status == ScenarioStatus.REVISION:
-        scenario.status = ScenarioStatus.IN_REVIEW
+        if scenario.status != ScenarioStatus.REVISION:
+            scenario.status = ScenarioStatus.DRAFT
 
     scenario.updated_at = datetime.now(UTC)
     await enqueue_sheet_writeback(session, scenario, writeback_changes)
@@ -1538,6 +1551,53 @@ async def update_scenario(
         select(Scenario).where(Scenario.id == scenario.id).options(*LOAD_SCENARIO)
     )
     if updated is None:  # pragma: no cover - the locked row cannot disappear here
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scenario not found")
+    return scenario_for_role(updated, user)
+
+
+@router.post("/{scenario_id}/submit", response_model=ScenarioRead)
+async def submit_scenario_for_review(
+    scenario_id: uuid.UUID,
+    user: User = Depends(require_roles(Role.SCENARIST)),
+    session: AsyncSession = Depends(get_session),
+) -> ScenarioRead:
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+    if scenario.assigned_scenarist_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the assigned scenarist can submit this scenario",
+        )
+    if scenario.status not in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Scenario is not waiting for scenarist submission",
+        )
+    if not scenario.content or not (scenario.content.script_text or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Script text is required before submission",
+        )
+
+    reset_downstream_approvals(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+    approval = approval_for(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+    if approval is not None:
+        approval.decision = ApprovalDecision.PENDING
+        approval.decided_by_id = None
+        approval.decided_at = None
+    scenario.status = ScenarioStatus.IN_REVIEW
+    scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {
+            "approval.responsible_review.decision": ApprovalDecision.PENDING.value,
+        },
+    )
+    await session.commit()
+    updated = await session.scalar(
+        select(Scenario).where(Scenario.id == scenario.id).options(*LOAD_SCENARIO)
+    )
+    if updated is None:  # pragma: no cover
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scenario not found")
     return scenario_for_role(updated, user)
 

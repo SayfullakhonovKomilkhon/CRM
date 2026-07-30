@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from crm.models import Role
 from crm.routers.catalog import (
-    ensure_active_manager_remains,
+    ensure_active_admin_remains,
     require_catalog_reader,
     resolve_user_client_id,
 )
@@ -112,28 +112,30 @@ async def test_internal_role_cannot_have_client_id() -> None:
     assert await resolve_user_client_id(FakeSession(), Role.EDITOR, None) is None
 
 
-def test_last_active_manager_cannot_be_deactivated_or_demoted() -> None:
-    manager = user(Role.MANAGER)
+def test_last_active_admin_cannot_be_deactivated_or_demoted() -> None:
+    administrator = user(Role.ADMIN)
 
     for role, active in (
-        (Role.MANAGER, False),
+        (Role.ADMIN, False),
         (Role.SCENARIST, True),
     ):
         with pytest.raises(HTTPException) as error:
-            ensure_active_manager_remains(manager, role, active, active_manager_count=1)
+            ensure_active_admin_remains(
+                administrator, role, active, active_admin_count=1
+            )
         assert error.value.status_code == 409
 
-    ensure_active_manager_remains(
-        manager,
-        Role.MANAGER,
+    ensure_active_admin_remains(
+        administrator,
+        Role.ADMIN,
         False,
-        active_manager_count=2,
+        active_admin_count=2,
     )
-    ensure_active_manager_remains(
+    ensure_active_admin_remains(
         user(Role.EDITOR),
         Role.EDITOR,
         False,
-        active_manager_count=1,
+        active_admin_count=1,
     )
 
 
@@ -141,6 +143,7 @@ def test_last_active_manager_cannot_be_deactivated_or_demoted() -> None:
 @pytest.mark.parametrize(
     "role",
     [
+        Role.ADMIN,
         Role.MANAGER,
         Role.EDITOR_MANAGER,
         Role.PUBLISHER_MANAGER,

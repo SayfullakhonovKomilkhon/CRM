@@ -318,6 +318,7 @@ async def test_wrong_manager_level_cannot_review_publication() -> None:
 @pytest.mark.parametrize(
     "stage",
     [
+        ApprovalStage.RESPONSIBLE_REVIEW,
         ApprovalStage.PRE_GENERATION_CLIENT,
         ApprovalStage.SOURCE_MATERIAL,
         ApprovalStage.MONTAGE_COMPLIANCE,

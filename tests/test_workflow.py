@@ -173,6 +173,18 @@ def test_montage_rejection_blocks_client_and_returns_work_to_editor() -> None:
     assert next_status == ScenarioStatus.EDITING
 
 
+def test_scenario_manager_rejection_is_terminal() -> None:
+    value = scenario()
+
+    next_status = status_after_decision(
+        value,
+        ApprovalStage.RESPONSIBLE_REVIEW,
+        ApprovalDecision.REJECTED,
+    )
+
+    assert next_status == ScenarioStatus.REJECTED
+
+
 def test_previously_published_section_stays_available_after_unpublishing() -> None:
     value = scenario(
         approvals=[approval(ApprovalStage.RESPONSIBLE_REVIEW, ApprovalDecision.REVISION)],

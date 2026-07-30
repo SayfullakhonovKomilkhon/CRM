@@ -46,6 +46,7 @@ PUBLISHER_MANAGER_VISIBLE_STATUSES = frozenset(
 )
 
 ROLE_APPROVAL_STAGES: dict[Role, set[ApprovalStage]] = {
+    Role.ADMIN: set(),
     Role.MANAGER: {ApprovalStage.RESPONSIBLE_REVIEW},
     Role.EDITOR_MANAGER: {
         ApprovalStage.SOURCE_MATERIAL,
@@ -211,7 +212,7 @@ def status_after_decision(
     transitions = {
         (ApprovalStage.RESPONSIBLE_REVIEW, ApprovalDecision.APPROVED): ScenarioStatus.CLIENT_REVIEW,
         (ApprovalStage.RESPONSIBLE_REVIEW, ApprovalDecision.REVISION): ScenarioStatus.REVISION,
-        (ApprovalStage.RESPONSIBLE_REVIEW, ApprovalDecision.REJECTED): ScenarioStatus.REVISION,
+        (ApprovalStage.RESPONSIBLE_REVIEW, ApprovalDecision.REJECTED): ScenarioStatus.REJECTED,
         (
             ApprovalStage.PRE_GENERATION_CLIENT,
             ApprovalDecision.APPROVED,

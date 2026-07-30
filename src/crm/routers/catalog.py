@@ -25,6 +25,7 @@ from crm.security import hash_password
 
 router = APIRouter(tags=["catalog"])
 require_catalog_reader = require_roles(
+    Role.ADMIN,
     Role.MANAGER,
     Role.EDITOR_MANAGER,
     Role.PUBLISHER_MANAGER,
@@ -50,7 +51,7 @@ async def list_clients(
 @router.post("/clients", response_model=ClientRead, status_code=status.HTTP_201_CREATED)
 async def create_client(
     payload: ClientCreate,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> Client:
     duplicate_conditions = [func.lower(Client.name) == payload.name.lower()]
@@ -80,7 +81,7 @@ async def create_client(
 async def update_client(
     client_id: uuid.UUID,
     payload: ClientUpdate,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> Client:
     client = await session.get(Client, client_id)
@@ -143,7 +144,7 @@ async def list_projects(
 @router.post("/projects", response_model=ProjectRead, status_code=status.HTTP_201_CREATED)
 async def create_project(
     payload: ProjectCreate,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> Project:
     client = require_active_client(await session.get(Client, payload.client_id))
@@ -176,7 +177,7 @@ async def create_project(
 async def update_project(
     project_id: uuid.UUID,
     payload: ProjectUpdate,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> Project:
     project = await session.get(Project, project_id)
@@ -232,21 +233,21 @@ async def resolve_user_client_id(
     return None
 
 
-def ensure_active_manager_remains(
+def ensure_active_admin_remains(
     target: User,
     next_role: Role,
     next_is_active: bool,
-    active_manager_count: int,
+    active_admin_count: int,
 ) -> None:
-    removes_active_manager = (
-        target.role == Role.MANAGER
+    removes_active_admin = (
+        target.role == Role.ADMIN
         and target.is_active
-        and (next_role != Role.MANAGER or not next_is_active)
+        and (next_role != Role.ADMIN or not next_is_active)
     )
-    if removes_active_manager and active_manager_count <= 1:
+    if removes_active_admin and active_admin_count <= 1:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="The last active manager cannot be deactivated or demoted",
+            detail="The last active administrator cannot be deactivated or demoted",
         )
 
 
@@ -254,7 +255,7 @@ def ensure_active_manager_remains(
 async def list_users(
     role: Role | None = None,
     active_only: bool = True,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = select(User).order_by(User.full_name, User.email)
@@ -268,7 +269,7 @@ async def list_users(
 @router.post("/users", response_model=UserAdminRead, status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: UserAdminCreate,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> User:
     email = str(payload.email).lower()
@@ -305,14 +306,14 @@ async def create_user(
 async def update_user(
     user_id: uuid.UUID,
     payload: UserAdminUpdate,
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
 ) -> User:
-    active_managers = list(
+    active_admins = list(
         (
             await session.scalars(
                 select(User)
-                .where(User.role == Role.MANAGER, User.is_active.is_(True))
+                .where(User.role == Role.ADMIN, User.is_active.is_(True))
                 .order_by(User.id)
                 .with_for_update()
             )
@@ -328,11 +329,11 @@ async def update_user(
         if "is_active" in payload.model_fields_set
         else target.is_active
     )
-    ensure_active_manager_remains(
+    ensure_active_admin_remains(
         target,
         next_role,
         next_is_active,
-        len(active_managers),
+        len(active_admins),
     )
 
     client_id_was_set = "client_id" in payload.model_fields_set
@@ -365,7 +366,7 @@ async def update_user(
 
 @router.get("/users/scenarists", response_model=list[UserOptionRead])
 async def list_scenarists(
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (
@@ -378,7 +379,7 @@ async def list_scenarists(
 
 @router.get("/users/editors", response_model=list[UserOptionRead])
 async def list_editors(
-    _: User = Depends(require_roles(Role.MANAGER, Role.EDITOR_MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.EDITOR_MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (
@@ -391,7 +392,7 @@ async def list_editors(
 
 @router.get("/users/publishers", response_model=list[UserOptionRead])
 async def list_publishers(
-    _: User = Depends(require_roles(Role.MANAGER, Role.PUBLISHER_MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN, Role.MANAGER, Role.PUBLISHER_MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (
@@ -404,7 +405,7 @@ async def list_publishers(
 
 @router.get("/users/editor-managers", response_model=list[UserOptionRead])
 async def list_editor_managers(
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (
@@ -417,7 +418,7 @@ async def list_editor_managers(
 
 @router.get("/users/publisher-managers", response_model=list[UserOptionRead])
 async def list_publisher_managers(
-    _: User = Depends(require_roles(Role.MANAGER)),
+    _: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
     query = (

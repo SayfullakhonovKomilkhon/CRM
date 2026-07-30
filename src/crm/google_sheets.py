@@ -799,7 +799,9 @@ def _derive_status(
     responsible = _decision(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
     if responsible == ApprovalDecision.APPROVED:
         return ScenarioStatus.CLIENT_REVIEW
-    if responsible in {ApprovalDecision.REVISION, ApprovalDecision.REJECTED}:
+    if responsible == ApprovalDecision.REJECTED:
+        return ScenarioStatus.REJECTED
+    if responsible == ApprovalDecision.REVISION:
         return ScenarioStatus.REVISION
     if scenario.content and scenario.content.script_text:
         return ScenarioStatus.IN_REVIEW

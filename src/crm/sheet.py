@@ -6,6 +6,7 @@ from crm.models import (
     GateDecision,
     PublicationReviewDecision,
     Role,
+    ScenarioStatus,
 )
 from crm.schemas import (
     EditorStatus,
@@ -489,8 +490,17 @@ CLIENT_SHEET_FIELD_NAMES = (
 
 
 def fields_for_role(role: Role) -> tuple[SheetFieldSpec, ...]:
+    if role == Role.ADMIN:
+        return ()
     if role == Role.CLIENT:
         return tuple(SHEET_FIELD_MAP[name] for name in CLIENT_SHEET_FIELD_NAMES)
+    if role == Role.MANAGER:
+        return tuple(
+            item
+            for item in SHEET_FIELDS
+            if item.group in {"Основное", "Исследование", "Сценарий"}
+            or item.field.startswith("approval.responsible_review.")
+        )
     return SHEET_FIELDS
 
 
@@ -656,7 +666,11 @@ def editable_fields_for_role(scenario: ScenarioRead, role: Role) -> list[str]:
     if role == Role.MANAGER:
         editable.add("assigned_scenarist_id")
     elif role == Role.SCENARIST:
-        editable.update(SCENARIST_SCENARIO_FIELDS)
+        if getattr(scenario, "status", ScenarioStatus.DRAFT) in {
+            ScenarioStatus.DRAFT,
+            ScenarioStatus.REVISION,
+        }:
+            editable.update(SCENARIST_SCENARIO_FIELDS)
         if "montage" in available_sections:
             editable.update(SCENARIST_SOURCE_FIELDS)
         if "publication" in available_sections:

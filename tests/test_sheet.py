@@ -38,7 +38,7 @@ from crm.sheet import (
 )
 
 
-def test_internal_roles_receive_all_sheet_columns() -> None:
+def test_scenario_manager_receives_only_scenario_review_columns() -> None:
     columns_by_role = {
         role: [column.field for column in columns_for_role(role)]
         for role in (
@@ -51,8 +51,14 @@ def test_internal_roles_receive_all_sheet_columns() -> None:
         )
     }
 
-    assert all(columns == columns_by_role[Role.MANAGER] for columns in columns_by_role.values())
-    assert len(columns_by_role[Role.MANAGER]) == 93
+    manager_columns = set(columns_by_role[Role.MANAGER])
+    assert "content.script_text" in manager_columns
+    assert "research.full_analysis" in manager_columns
+    assert "approval.responsible_review.decision" in manager_columns
+    assert not any(field.startswith("montage.") for field in manager_columns)
+    assert not any(field.startswith("publication.") for field in manager_columns)
+    assert "approval.pre_generation_client.decision" not in manager_columns
+    assert len(columns_by_role[Role.SCENARIST]) > len(columns_by_role[Role.MANAGER])
 
 
 def test_client_receives_only_the_safe_workflow_projection_in_order() -> None:
@@ -85,7 +91,7 @@ def test_client_receives_only_the_safe_workflow_projection_in_order() -> None:
 
 
 def test_sheet_registry_contains_every_persisted_workflow_field() -> None:
-    columns = {column.field for column in columns_for_role(Role.MANAGER)}
+    columns = {column.field for column in columns_for_role(Role.SCENARIST)}
     expected = {
         "content.claude_context",
         "content.ai_review",

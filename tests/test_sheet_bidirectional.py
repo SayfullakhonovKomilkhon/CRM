@@ -29,7 +29,6 @@ from crm.sheet_sync import (
     column_letters,
     column_number,
     enqueue_sheet_writeback,
-    finalize_inbound_revision,
     inbound_update_allowed,
     process_inbound_event,
     process_writeback_event,
@@ -77,19 +76,15 @@ def scenario_in_revision(stage):
     "stage",
     [ApprovalStage.RESPONSIBLE_REVIEW, ApprovalStage.PRE_GENERATION_CLIENT],
 )
-def test_scenarist_revision_accepts_sheet_version_and_resets_from_stage(stage):
+def test_scenarist_revision_accepts_sheet_edit_without_automatic_resubmit(stage):
     value = scenario_in_revision(stage)
 
     assert active_scenarist_revision_stage(value) == stage
     assert inbound_update_allowed(value) is True
-    finalize_inbound_revision(value, stage)
-
-    stage_index = list(ApprovalStage).index(stage)
-    for item in value.approvals:
-        if list(ApprovalStage).index(item.stage) >= stage_index:
-            assert item.decision == ApprovalDecision.PENDING
-            assert item.decided_at is None
-    assert value.status == ScenarioStatus.IN_REVIEW
+    assert value.status == ScenarioStatus.REVISION
+    assert next(item for item in value.approvals if item.stage == stage).decision == (
+        ApprovalDecision.REVISION
+    )
 
 
 @pytest.mark.parametrize(

@@ -741,6 +741,7 @@ class SheetColumnRead(BaseModel):
 
 class SheetScenarioRow(BaseModel):
     id: uuid.UUID
+    status: ScenarioStatus
     version: datetime
     values: dict[str, Any]
     editable_fields: list[str]

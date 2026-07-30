@@ -24,6 +24,7 @@ from crm.database import Base
 
 
 class Role(StrEnum):
+    ADMIN = "admin"
     SCENARIST = "scenarist"
     MANAGER = "manager"
     EDITOR_MANAGER = "editor_manager"
@@ -37,6 +38,7 @@ class ScenarioStatus(StrEnum):
     DRAFT = "draft"
     IN_REVIEW = "in_review"
     REVISION = "revision"
+    REJECTED = "rejected"
     APPROVED = "approved"
     SENT_TO_GENERATION = "sent_to_generation"
     HANDED_TO_EDITOR = "handed_to_editor"
