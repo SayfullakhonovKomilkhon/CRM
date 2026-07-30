@@ -142,6 +142,8 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
 
     assert "fullRowFields_" in script
     assert "hasMeaningfulFields_" in script
+    assert "rowIdAppearsEarlier_" in script
+    assert "One malformed or workflow-locked row must not block rows below it." in script
     assert 'new Set(["montage.material_status"])' in script
     assert 'newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5)' in script
     assert 'response.status === "failed"' in script

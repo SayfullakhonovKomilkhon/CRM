@@ -88,15 +88,20 @@ function reconcileCrmRows() {
     const claimedRowIds = {};
 
     for (let rowNumber = cursor; rowNumber <= endRow; rowNumber += 1) {
-      syncCrmRow_(
-        sheet,
-        rowNumber,
-        map,
-        rowIdColumn,
-        props,
-        spreadsheet.getId(),
-        {force: false, a1: `${rowNumber}:${rowNumber}`, claimedRowIds}
-      );
+      try {
+        syncCrmRow_(
+          sheet,
+          rowNumber,
+          map,
+          rowIdColumn,
+          props,
+          spreadsheet.getId(),
+          {force: false, a1: `${rowNumber}:${rowNumber}`, claimedRowIds}
+        );
+      } catch (error) {
+        // One malformed or workflow-locked row must not block rows below it.
+        console.warn(`CRM row ${rowNumber} was not synchronized: ${error.message}`);
+      }
     }
     props.setProperty(
       "CRM_RECONCILE_CURSOR",
@@ -116,7 +121,11 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
 
   let rowId = rawRowId;
   const claimed = options.claimedRowIds || null;
-  if (!hasExistingIdentity || (claimed && claimed[rowId])) {
+  const duplicateIdentity = hasExistingIdentity && (
+    (claimed && claimed[rowId]) ||
+    rowIdAppearsEarlier_(sheet, rowNumber, rowIdColumn, rowId, props)
+  );
+  if (!hasExistingIdentity || duplicateIdentity) {
     rowId = Utilities.getUuid();
     // The service column may inherit checkbox validation from its neighbour.
     rowIdCell.clearDataValidations();
@@ -148,10 +157,27 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     payload
   );
   if (response && response.status === "failed") {
+    if (String(response.error || "").includes("workflow has started")) {
+      // The CRM owns the row after submission. Remember the snapshot so the
+      // periodic recovery does not retry it until the Sheet changes again.
+      props.setProperty(checksumKey, checksum);
+      return false;
+    }
     throw new Error(response.error || "CRM rejected the row");
   }
   props.setProperty(checksumKey, checksum);
   return true;
+}
+
+function rowIdAppearsEarlier_(sheet, rowNumber, rowIdColumn, rowId, props) {
+  const firstDataRow = Number(props.getProperty("CRM_HEADER_ROW") || "1") + 1;
+  if (rowNumber <= firstDataRow) return false;
+  return sheet.getRange(
+    firstDataRow,
+    rowIdColumn,
+    rowNumber - firstDataRow,
+    1
+  ).getDisplayValues().some((values) => values[0].trim() === rowId);
 }
 
 function fullRowFields_(sheet, rowNumber, map) {
