@@ -3,19 +3,113 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import or_, select
+from sqlalchemy.orm import selectinload
 
 from crm.config import settings
 from crm.database import SessionLocal
 from crm.google_sheets import google_sheets_client
 from crm.models import (
+    MontageTask,
+    Project,
+    Publication,
+    Scenario,
     SheetEventStatus,
     SheetInboundEvent,
+    SheetSource,
     SheetWritebackEvent,
     SheetWritebackStatus,
 )
-from crm.sheet_sync import dequeue_redis, process_inbound_event, process_writeback_event
+from crm.sheet_mapping import canonical_layout_enabled
+from crm.sheet_sync import (
+    crm_owned_writeback_snapshot,
+    dequeue_redis,
+    enqueue_sheet_writeback,
+    process_inbound_event,
+    process_writeback_event,
+)
 
 logger = logging.getLogger(__name__)
+CANONICAL_BACKFILL_VERSION = "canonical-role-writeback-v1"
+BACKFILL_BATCH_SIZE = 200
+
+
+async def enqueue_canonical_backfill() -> int:
+    """Queue one full snapshot for every existing row in the approved layout."""
+    queued_count = 0
+    async with SessionLocal() as session:
+        sources = list(
+            (
+                await session.scalars(
+                    select(SheetSource).where(SheetSource.enabled.is_(True))
+                )
+            ).all()
+        )
+        canonical_source_ids = {
+            source.id for source in sources if canonical_layout_enabled(source)
+        }
+        if not canonical_source_ids:
+            return 0
+        scenario_ids = list(
+            (
+                await session.scalars(
+                    select(Scenario.id)
+                    .where(Scenario.sheet_source_id.in_(canonical_source_ids))
+                    .order_by(Scenario.id)
+                )
+            ).all()
+        )
+        for offset in range(0, len(scenario_ids), BACKFILL_BATCH_SIZE):
+            batch_ids = scenario_ids[offset : offset + BACKFILL_BATCH_SIZE]
+            correlations = {
+                scenario_id: f"{CANONICAL_BACKFILL_VERSION}:{scenario_id}"
+                for scenario_id in batch_ids
+            }
+            existing = set(
+                (
+                    await session.scalars(
+                        select(SheetWritebackEvent.correlation_id).where(
+                            SheetWritebackEvent.correlation_id.in_(
+                                correlations.values()
+                            )
+                        )
+                    )
+                ).all()
+            )
+            scenarios = list(
+                (
+                    await session.scalars(
+                        select(Scenario)
+                        .where(Scenario.id.in_(batch_ids))
+                        .options(
+                            selectinload(Scenario.project).selectinload(Project.client),
+                            selectinload(Scenario.assigned_scenarist),
+                            selectinload(Scenario.research),
+                            selectinload(Scenario.content),
+                            selectinload(Scenario.approvals),
+                            selectinload(Scenario.montage).selectinload(
+                                MontageTask.assigned_editor
+                            ),
+                            selectinload(Scenario.publication).selectinload(
+                                Publication.assigned_publisher
+                            ),
+                            selectinload(Scenario.final_revision_gate),
+                        )
+                    )
+                ).all()
+            )
+            for scenario in scenarios:
+                correlation_id = correlations[scenario.id]
+                if correlation_id in existing:
+                    continue
+                event = await enqueue_sheet_writeback(
+                    session,
+                    scenario,
+                    crm_owned_writeback_snapshot(scenario),
+                    correlation_id=correlation_id,
+                )
+                queued_count += event is not None
+            await session.commit()
+    return queued_count
 
 
 async def run_once() -> bool:
@@ -73,6 +167,9 @@ async def run_once() -> bool:
 
 
 async def main() -> None:
+    queued_backfills = await enqueue_canonical_backfill()
+    if queued_backfills:
+        logger.info("Queued %s canonical Google Sheets backfills", queued_backfills)
     while True:
         try:
             queued = await dequeue_redis(

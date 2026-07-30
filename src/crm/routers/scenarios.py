@@ -83,12 +83,11 @@ from crm.schemas import (
     normalize_http_url,
 )
 from crm.sheet import (
-    SHEET_FIELDS,
     columns_for_role,
     editable_fields_for_role,
     values_for_role,
 )
-from crm.sheet_sync import enqueue_sheet_writeback
+from crm.sheet_sync import enqueue_sheet_writeback, scenario_writeback_snapshot
 from crm.workflow import (
     EDITOR_ACTION_STATUSES,
     EDITOR_MANAGER_VISIBLE_STATUSES,
@@ -367,11 +366,13 @@ async def apply_publication_manager_review(
             await session.get(User, assigned_publisher_id)
         )
         publication.assigned_publisher_id = publisher.id
+        publication.assigned_publisher = publisher
         publication.preparation_status = PublicationPreparationStatus.APPROVED.value
         publication.publisher_status = PublisherStatus.ASSIGNED
         scenario.status = ScenarioStatus.READY_TO_PUBLISH
     else:
         publication.assigned_publisher_id = None
+        publication.assigned_publisher = None
         publication.preparation_status = PublicationPreparationStatus.REVISION.value
         publication.publisher_status = PublisherStatus.PENDING
         scenario.status = ScenarioStatus.APPROVED
@@ -993,31 +994,18 @@ def loaded_scenario_writeback(
     scenario: Scenario,
     *,
     scenarist_name: str | None = None,
-) -> dict[str, object]:
-    approvals = {
-        item.stage.value: item
-        for item in getattr(scenario, "approvals", ())
-    }
-    values: dict[str, object] = {}
-    for item in SHEET_FIELDS:
-        if item.field == "assigned_scenarist_id":
-            continue
-        if item.field.startswith("approval."):
-            _, stage, attribute = item.field.split(".")
-            value = getattr(approvals.get(stage), attribute, None)
-        else:
-            value: object | None = scenario
-            for part in item.field.split("."):
-                value = getattr(value, part, None)
-                if value is None:
-                    break
-        if hasattr(value, "value"):
-            value = value.value
-        if value is not None:
-            values[item.field] = value
-    if scenarist_name is not None:
-        values["scenarist.name"] = scenarist_name
-    return values
+    include_empty: bool = False,
+) -> dict[str, object | None]:
+    return scenario_writeback_snapshot(
+        scenario,
+        include_empty=include_empty,
+        scenarist_name=scenarist_name,
+    )
+
+
+def full_scenario_writeback(scenario: Scenario) -> dict[str, object | None]:
+    """Serialize every Google-visible CRM value, including cleared cells."""
+    return loaded_scenario_writeback(scenario, include_empty=True)
 
 
 async def exact_sheet_source_for_assignment(
@@ -1071,6 +1059,7 @@ async def assign_scenarist_without_moving_sheet_row(
                 ),
             )
         scenario.assigned_scenarist_id = assigned_scenarist_id
+        scenario.assigned_scenarist = assigned_scenarist
         return False, assigned_scenarist.full_name
 
     source = await exact_sheet_source_for_assignment(
@@ -1079,6 +1068,7 @@ async def assign_scenarist_without_moving_sheet_row(
         assigned_scenarist_id,
     )
     scenario.assigned_scenarist_id = assigned_scenarist_id
+    scenario.assigned_scenarist = assigned_scenarist
     scenario.sheet_source_id = source.id
     scenario.crm_row_id = scenario.crm_row_id or uuid.uuid4()
     scenario.source_sheet_id = source.spreadsheet_id
@@ -1108,11 +1098,6 @@ async def create_scenario(
         payload.assigned_scenarist_id,
         requested_scenarist,
     )
-    assigned_scenarist_name = (
-        requested_scenarist.full_name
-        if requested_scenarist is not None
-        else user.full_name
-    )
     sheet_source = await exact_sheet_source_for_assignment(
         session,
         payload.project_id,
@@ -1134,6 +1119,8 @@ async def create_scenario(
         ]
         data["external_id"] = str(max(numeric_ids, default=0) + 1)
     scenario = Scenario(**data)
+    scenario.project = project
+    scenario.assigned_scenarist = requested_scenarist or user
     if payload.research:
         scenario.research = ScenarioResearch(**payload.research.model_dump())
     if payload.content:
@@ -1144,11 +1131,7 @@ async def create_scenario(
         await enqueue_sheet_writeback(
             session,
             scenario,
-            scenario_create_writeback(
-                payload,
-                scenario.external_id,
-                assigned_scenarist_name,
-            ),
+            full_scenario_writeback(scenario),
         )
         await session.commit()
     except IntegrityError as error:
@@ -1389,8 +1372,14 @@ async def patch_scenario_sheet_row(
         else:  # pragma: no cover - guarded by editable field registry
             raise HTTPException(status_code=422, detail=f"Unsupported field {change.field}")
         old_value = getattr(target, attribute)
-        if change.field == "montage.assigned_editor_id" and value is not None:
-            value = require_assignable_editor(await session.get(User, value)).id
+        if change.field == "montage.assigned_editor_id":
+            assigned_editor = (
+                require_assignable_editor(await session.get(User, value))
+                if value is not None
+                else None
+            )
+            value = assigned_editor.id if assigned_editor is not None else None
+            target.assigned_editor = assigned_editor
         script_changed |= change.field == "content.script_text" and old_value != value
         source_material_changed |= (
             target_name == "montage"
@@ -1676,12 +1665,20 @@ async def patch_scenario_sheet_row(
             scenario.status = status_after_unpublishing(scenario)
 
     scenario.updated_at = datetime.now(UTC)
+    workflow_side_effects = bool(
+        sheet_source_bound
+        or script_changed
+        or source_material_changed
+        or ready_material_changed
+        or publication_content_changed
+        or approval_changes
+        or gate_changes
+        or publication_review_changes
+        or publisher_changes
+    )
     writeback_changes = (
-        loaded_scenario_writeback(
-            scenario,
-            scenarist_name=assigned_scenarist_name,
-        )
-        if sheet_source_bound
+        full_scenario_writeback(scenario)
+        if workflow_side_effects
         else {change.field: change.value for change in payload.changes}
     )
     if assigned_scenarist_name is not None and not sheet_source_bound:
@@ -1769,10 +1766,7 @@ async def retry_scenario_sheet_sync(
     event = await enqueue_sheet_writeback(
         session,
         scenario,
-        loaded_scenario_writeback(
-            scenario,
-            scenarist_name=assigned_scenarist.full_name,
-        ),
+        full_scenario_writeback(scenario),
     )
     if event is None:
         raise HTTPException(
@@ -1868,7 +1862,11 @@ async def update_scenario(
         writeback_changes.pop("assigned_scenarist_id", None)
         writeback_changes["scenarist.name"] = assigned_scenarist_name
     scenario.updated_at = datetime.now(UTC)
-    await enqueue_sheet_writeback(session, scenario, writeback_changes)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        full_scenario_writeback(scenario) if script_changed else writeback_changes,
+    )
     await session.commit()
     updated = await session.scalar(
         select(Scenario).where(Scenario.id == scenario.id).options(*LOAD_SCENARIO)
@@ -1906,9 +1904,7 @@ async def submit_scenario_for_review(
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {
-            "approval.responsible_review.decision": ApprovalDecision.PENDING.value,
-        },
+        full_scenario_writeback(scenario),
     )
     await session.commit()
     updated = await session.scalar(
@@ -1973,10 +1969,7 @@ async def submit_source_material_for_review(
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {
-            "montage.material_status": SourceMaterialStatus.READY_FOR_REVIEW.value,
-            "approval.source_material.decision": ApprovalDecision.PENDING.value,
-        },
+        full_scenario_writeback(scenario),
     )
     await session.commit()
     updated = await session.scalar(
@@ -2020,8 +2013,8 @@ async def set_approval(
         )
     )
     if approval is None:
-        approval = ScenarioApproval(scenario_id=scenario_id, stage=stage)
-        session.add(approval)
+        approval = ScenarioApproval(stage=stage)
+        scenario.approvals.append(approval)
     approval.decision = payload.decision
     approval.comment = payload.comment
     if "note" in payload.model_fields_set:
@@ -2066,7 +2059,11 @@ async def set_approval(
                 ),
             }
         )
-    await enqueue_sheet_writeback(session, scenario, approval_writeback)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        full_scenario_writeback(scenario),
+    )
     await session.commit()
     await session.refresh(approval)
     return approval
@@ -2111,10 +2108,7 @@ async def decide_final_revision_gate(
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {
-            "final_revision_gate.decision": gate.decision.value,
-            "final_revision_gate.manager_comment": gate.manager_comment,
-        },
+        full_scenario_writeback(scenario),
     )
     await session.commit()
     await session.refresh(gate)
@@ -2205,9 +2199,16 @@ async def update_montage(
         "assigned_editor_id" in montage_changes
         and montage_changes["assigned_editor_id"] is not None
     ):
-        montage_changes["assigned_editor_id"] = require_assignable_editor(
+        assigned_editor = require_assignable_editor(
             await session.get(User, montage_changes["assigned_editor_id"])
-        ).id
+        )
+        montage_changes["assigned_editor_id"] = assigned_editor.id
+        scenario.montage.assigned_editor = assigned_editor
+    elif (
+        "assigned_editor_id" in montage_changes
+        and montage_changes["assigned_editor_id"] is None
+    ):
+        scenario.montage.assigned_editor = None
     source_material_changed = any(
         field in montage_changes
         and getattr(scenario.montage, field) != montage_changes[field]
@@ -2230,7 +2231,7 @@ async def update_montage(
     await enqueue_sheet_writeback(
         session,
         scenario,
-        writeback_changes,
+        full_scenario_writeback(scenario),
     )
     await session.commit()
     updated = await get_visible_scenario(session, scenario.id, user)
@@ -2269,7 +2270,7 @@ async def update_montage_as_editor(
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {f"montage.{key}": value for key, value in editor_changes.items()},
+        full_scenario_writeback(scenario),
     )
     await session.commit()
     await session.refresh(scenario.montage)
@@ -2305,7 +2306,7 @@ async def update_publication(
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {f"publication.{key}": value for key, value in publication_changes.items()},
+        full_scenario_writeback(scenario),
     )
     await session.commit()
     await session.refresh(scenario.publication)
@@ -2362,6 +2363,11 @@ async def submit_publication_for_review(
     publication.assigned_publisher_id = None
     publication.publisher_status = PublisherStatus.PENDING
     scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        full_scenario_writeback(scenario),
+    )
     await session.commit()
     updated = await session.scalar(
         select(Scenario).where(Scenario.id == scenario.id).options(*LOAD_SCENARIO)
@@ -2391,17 +2397,10 @@ async def review_publication(
         user,
     )
     scenario.updated_at = datetime.now(UTC)
-    publication = scenario.publication
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {
-            "publication.manager_review_decision": (
-                publication.manager_review_decision.value
-            ),
-            "publication.manager_review_comment": publication.manager_review_comment,
-            "publication.assigned_publisher_id": publication.assigned_publisher_id,
-        },
+        full_scenario_writeback(scenario),
     )
     await session.commit()
     updated = await get_visible_scenario(session, scenario.id, user)
@@ -2437,11 +2436,7 @@ async def update_publication_as_publisher(
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {
-            "publication.publisher_status": publication.publisher_status.value,
-            "publication.publisher_comment": publication.publisher_comment,
-            **{f"publication.{key}": value for key, value in urls.items()},
-        },
+        full_scenario_writeback(scenario),
     )
     await session.commit()
     await session.refresh(publication)

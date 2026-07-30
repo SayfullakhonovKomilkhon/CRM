@@ -20,6 +20,7 @@ from crm.main import app
 from crm.models import (
     ApprovalDecision,
     ApprovalStage,
+    PublisherStatus,
     Role,
     Scenario,
     ScenarioStatus,
@@ -29,14 +30,23 @@ from crm.models import (
 )
 from crm.routers import scenarios as scenario_routes
 from crm.schemas import ScenarioCreate, SheetWebhookEvent
+from crm.sheet import SHEET_FIELDS
+from crm.sheet_mapping import (
+    CANONICAL_WRITEBACK_COLUMN_MAP,
+    MANAGED_EXTENSION_HEADERS,
+    effective_writeback_column_map,
+)
 from crm.sheet_sync import (
+    CRM_OWNED_WRITEBACK_FIELDS,
     REALTIME_SERVER_CONTROLLED_FIELDS,
     WRITEBACK_FIELDS,
+    WRITEBACK_ID_FIELDS,
     _set_values,
     active_scenarist_revision_stage,
     append_row_values,
     column_letters,
     column_number,
+    crm_owned_writeback_snapshot,
     enqueue_sheet_writeback,
     inbound_update_allowed,
     process_inbound_event,
@@ -152,6 +162,9 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert "rowIdAppearsEarlier_" in script
     assert "One malformed or workflow-locked row must not block rows below it." in script
     assert "const CRM_SCENARIST_INBOUND_FIELDS = new Set([" in script
+    assert "const CRM_CANONICAL_INBOUND_COLUMN_MAP = {" in script
+    assert '"63": "publication.description_instagram"' in script
+    assert "canonicalLayout ? CRM_CANONICAL_INBOUND_COLUMN_MAP : {}" in script
     assert '"external_id"' in script
     assert '"content.script_text"' in script
     assert '"montage.source_material_url"' in script
@@ -469,6 +482,82 @@ def test_identity_column_is_separate_from_workflow_allowlist():
         )
 
 
+def test_canonical_role_writeback_map_is_complete_and_keeps_bz_for_identity():
+    assert CANONICAL_WRITEBACK_COLUMN_MAP["external_id"] == "B"
+    assert CANONICAL_WRITEBACK_COLUMN_MAP["content.script_text"] == "T"
+    assert CANONICAL_WRITEBACK_COLUMN_MAP["approval.final_client.decision"] == "BC"
+    assert CANONICAL_WRITEBACK_COLUMN_MAP["publication.publisher_status"] == "CL"
+    assert "BZ" not in CANONICAL_WRITEBACK_COLUMN_MAP.values()
+    assert len(set(CANONICAL_WRITEBACK_COLUMN_MAP.values())) == len(
+        CANONICAL_WRITEBACK_COLUMN_MAP
+    )
+    assert set(MANAGED_EXTENSION_HEADERS) <= set(CANONICAL_WRITEBACK_COLUMN_MAP)
+    assert WRITEBACK_ID_FIELDS.isdisjoint(WRITEBACK_FIELDS)
+    expected_fields = {
+        item.field for item in SHEET_FIELDS
+        if item.field not in WRITEBACK_ID_FIELDS
+    } | {"comments.latest"}
+    assert set(CANONICAL_WRITEBACK_COLUMN_MAP) == expected_fields
+
+
+def test_canonical_mapping_fills_missing_roles_but_preserves_explicit_overrides():
+    source = SimpleNamespace(
+        writeback_column_map={
+            "external_id": 2,
+            "content.script_text": 20,
+            "montage.external_editor_name": "AO",
+            "publication.assigned_publisher_id": "CE",
+        }
+    )
+
+    mapping = effective_writeback_column_map(source)
+
+    assert mapping["approval.responsible_review.decision"] == "AE"
+    assert mapping["publication.publisher_status"] == "CL"
+    assert mapping["montage.assigned_editor_name"] == "AO"
+    assert mapping["montage.external_editor_name"] == "BQ"
+    assert "publication.assigned_publisher_id" not in mapping
+    assert mapping["publication.assigned_publisher_name"] == "CE"
+
+    protected_layout = SimpleNamespace(
+        header_row=4,
+        crm_row_id_column="BZ",
+        writeback_column_map={},
+    )
+    protected_mapping = effective_writeback_column_map(protected_layout)
+    assert protected_mapping["external_id"] == "B"
+    assert protected_mapping["publication.publisher_status"] == "CL"
+
+
+async def test_canonical_source_writes_crm_owned_role_field_not_in_stored_subset():
+    source_id = uuid.uuid4()
+    scenario_id = uuid.uuid4()
+    row_id = uuid.uuid4()
+    source = SimpleNamespace(
+        id=source_id,
+        enabled=True,
+        writeback_column_map={
+            "external_id": "B",
+            "content.script_text": "T",
+        },
+    )
+    session = FakeSession(source)
+    scenario = SimpleNamespace(
+        id=scenario_id,
+        sheet_source_id=source_id,
+        crm_row_id=row_id,
+    )
+
+    event = await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {"publication.publisher_status": "published"},
+    )
+
+    assert event is not None
+    assert event.changed_fields == {"publication.publisher_status": "published"}
+
+
 def test_new_sheet_row_places_fields_and_identity_in_sparse_columns():
     row_id = uuid.uuid4()
     source = SimpleNamespace(
@@ -532,6 +621,74 @@ def test_loaded_writeback_uses_scenarist_name_instead_of_uuid():
     assert values["external_id"] == "125"
     assert values["scenarist.name"] == "Сценарист для таблицы"
     assert "assigned_scenarist_id" not in values
+
+
+def test_full_writeback_serializes_each_role_and_cleared_cells():
+    decided_at = datetime.now(UTC)
+    scenario = SimpleNamespace(
+        approvals=[
+            SimpleNamespace(
+                stage=ApprovalStage.RESPONSIBLE_REVIEW,
+                decision=ApprovalDecision.APPROVED,
+                comment="Менеджер сценаристов одобрил",
+                note=None,
+                decided_at=decided_at,
+            ),
+            SimpleNamespace(
+                stage=ApprovalStage.FINAL_CLIENT,
+                decision=ApprovalDecision.REVISION,
+                comment="Клиент просит правку",
+                note=None,
+                decided_at=decided_at,
+            ),
+        ],
+        external_id="148",
+        project=SimpleNamespace(name="Проект", client_name="Клиент"),
+        scenarist=SimpleNamespace(name="Сценарист"),
+        content=SimpleNamespace(script_text="Сценарий"),
+        montage=SimpleNamespace(
+            assigned_editor_id=uuid.uuid4(),
+            assigned_editor_name="Монтажёр",
+            editor_status="готово",
+            editor_comment=None,
+        ),
+        publication=SimpleNamespace(
+            assigned_publisher_id=uuid.uuid4(),
+            assigned_publisher_name="Публицист",
+            publisher_status=PublisherStatus.PUBLISHED,
+            publisher_comment="Готово",
+        ),
+        final_revision_gate=SimpleNamespace(
+            request_comment="Причина",
+            decision="pending",
+            manager_comment=None,
+            decided_at=None,
+        ),
+    )
+
+    values = scenario_routes.loaded_scenario_writeback(
+        scenario,
+        include_empty=True,
+    )
+
+    assert values["content.script_text"] == "Сценарий"
+    assert values["approval.responsible_review.decision"] == "approved"
+    assert values["approval.final_client.comment"] == "Клиент просит правку"
+    assert values["montage.assigned_editor_name"] == "Монтажёр"
+    assert values["montage.editor_comment"] is None
+    assert values["publication.assigned_publisher_name"] == "Публицист"
+    assert values["publication.publisher_status"] == "published"
+    assert values["final_revision_gate.manager_comment"] is None
+    assert "montage.assigned_editor_id" not in values
+    assert "publication.assigned_publisher_id" not in values
+
+    crm_owned = crm_owned_writeback_snapshot(scenario)
+    assert "content.script_text" not in crm_owned
+    assert "montage.scenarist_revision_comment" not in crm_owned
+    assert crm_owned["approval.final_client.comment"] == "Клиент просит правку"
+    assert crm_owned["montage.editor_status"] == "готово"
+    assert crm_owned["publication.publisher_status"] == "published"
+    assert "publication.publisher_status" in CRM_OWNED_WRITEBACK_FIELDS
 
 
 @pytest.mark.parametrize(
@@ -833,6 +990,76 @@ async def test_writeback_creates_or_recovers_new_sheet_row_idempotently(existing
     assert scenario.source_row == 128
     assert client.append_calls == (0 if existing_row else 1)
     assert client.updates[0]["range"] == "'сценарий'!CA128"
+
+
+async def test_role_writeback_clears_stale_value_and_ensures_extension_header():
+    source_id = uuid.uuid4()
+    scenario_id = uuid.uuid4()
+    row_id = uuid.uuid4()
+    event = SimpleNamespace(
+        id=uuid.uuid4(),
+        status=SheetWritebackStatus.PENDING,
+        attempts=0,
+        source_id=source_id,
+        scenario_id=scenario_id,
+        crm_row_id=row_id,
+        changed_fields={"publication.publisher_status": None},
+        error=None,
+        next_attempt_at=None,
+        processed_at=None,
+    )
+    source = SimpleNamespace(
+        id=source_id,
+        enabled=True,
+        spreadsheet_id="sheet",
+        source_tab="сценарий",
+        header_row=4,
+        crm_row_id_column="BZ",
+        writeback_column_map={
+            "external_id": "B",
+            "content.script_text": "T",
+        },
+        last_status=None,
+        last_error=None,
+        last_sync_at=None,
+    )
+    scenario = SimpleNamespace(
+        id=scenario_id,
+        crm_row_id=row_id,
+        source_row=148,
+        source_sheet_id="sheet",
+        source_tab="сценарий",
+    )
+
+    class RoleSession:
+        async def scalar(self, _query):
+            return event
+
+        async def get(self, model, _identifier):
+            return source if model is SheetSource else scenario
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    class RoleClient:
+        def __init__(self):
+            self.updates = []
+
+        async def batch_update_values(self, _spreadsheet_id, updates, **_kwargs):
+            self.updates = updates
+
+    client = RoleClient()
+    result = await process_writeback_event(RoleSession(), event.id, client)
+
+    assert result.status == SheetWritebackStatus.COMPLETED
+    assert {
+        item["range"]: item["values"]
+        for item in client.updates
+    } == {
+        "'сценарий'!BZ148": [[str(row_id)]],
+        "'сценарий'!CL148": [[""]],
+        "'сценарий'!CL4": [["Статус публикации"]],
+    }
 
 
 def test_models_define_idempotency_and_stable_row_constraints():

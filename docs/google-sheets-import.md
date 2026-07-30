@@ -1,8 +1,10 @@
 # Google Sheets → CRM import
 
-The adapter is one-way:
+The adapter has an asymmetric bidirectional contract:
 
-`Google Sheets → backend preview/validation → PostgreSQL → CRM`
+`Scenarist Google columns ↔ CRM`
+
+`Client / manager / editor / publisher CRM columns → Google Sheets`
 
 Google credentials exist only in backend environment variables. The frontend never receives
 the private key, access token, spreadsheet ID, raw mapping, or source checksums. Every endpoint
@@ -101,8 +103,9 @@ serializes concurrent syncs for the same spreadsheet/tab. A changed source or CR
 - Rows without that marker are skipped before validation. This also applies to
   rows that already have a protected `crm_row_id`.
 - The visible `ID` column is imported as `scenarios.external_id`. A submitted
-  new row with a configured but empty ID is rejected. IDs must be globally
-  unique; a duplicate is reported instead of silently renumbering the row.
+  new row with a configured but empty ID is rejected. Visible IDs are business
+  display values and may repeat; the protected `crm_row_id` remains the unique
+  technical identity.
 - The protected `crm_row_id` UUID remains a separate technical identity and is
   never shown as the business ID.
 - CRM changes write back to Google automatically. Google changes remain in the

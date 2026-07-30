@@ -58,6 +58,7 @@ from crm.schemas import (
     SheetWebhookEvent,
     SheetWritebackEventRead,
 )
+from crm.sheet_mapping import effective_writeback_column_map
 from crm.sheet_sync import (
     WRITEBACK_FIELDS,
     column_letters,
@@ -86,10 +87,18 @@ async def _source_targets(
 
 def _protect_identity_column(values: dict) -> None:
     identity = values.get("crm_row_id_column", "A").strip().upper()
+    source_view = type(
+        "SourceMappingView",
+        (),
+        {"writeback_column_map": values.get("writeback_column_map", {})},
+    )()
+    writeback_map = effective_writeback_column_map(source_view)
     mapped = {
         column_letters(reference)
-        for mapping_name in ("inbound_column_map", "writeback_column_map")
-        for reference in values.get(mapping_name, {}).values()
+        for reference in (
+            *values.get("inbound_column_map", {}).values(),
+            *writeback_map.values(),
+        )
     }
     if identity in mapped:
         raise HTTPException(

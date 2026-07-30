@@ -42,14 +42,31 @@ from crm.models import (
     SheetWritebackStatus,
 )
 from crm.schemas import ScenarioCreate
-from crm.sheet import SHEET_FIELDS
+from crm.sheet import SCENARIST_OWNED_FIELD_NAMES, SHEET_FIELDS
+from crm.sheet_mapping import (
+    MANAGED_EXTENSION_HEADERS,
+    effective_writeback_column_map,
+)
 from crm.workflow import approval_for, submit_for_responsible_review
 
 WEBHOOK_SCHEMA_VERSION = 1
 SHEETS_ORIGIN = "sheets"
 CRM_ORIGIN = "crm"
 COLUMN_RE = re.compile(r"^[A-Z]{1,3}$")
-WRITEBACK_FIELDS = frozenset({item.field for item in SHEET_FIELDS} | {"comments.latest"})
+WRITEBACK_ID_FIELDS = frozenset(
+    {
+        "assigned_scenarist_id",
+        "montage.assigned_editor_id",
+        "publication.assigned_publisher_id",
+    }
+)
+WRITEBACK_FIELDS = frozenset(
+    ({item.field for item in SHEET_FIELDS} | {"comments.latest"})
+    - WRITEBACK_ID_FIELDS
+)
+CRM_OWNED_WRITEBACK_FIELDS = frozenset(
+    WRITEBACK_FIELDS - SCENARIST_OWNED_FIELD_NAMES
+)
 REALTIME_SERVER_CONTROLLED_FIELDS = frozenset({"montage.material_status"})
 
 
@@ -487,10 +504,11 @@ async def enqueue_sheet_writeback(
     source = await session.get(SheetSource, scenario.sheet_source_id)
     if source is None or not source.enabled:
         return None
+    writeback_map = effective_writeback_column_map(source)
     approved = {
         key: value
         for key, value in changed_fields.items()
-        if key in source.writeback_column_map and key in WRITEBACK_FIELDS
+        if key in writeback_map and key in WRITEBACK_FIELDS
     }
     if not approved:
         return None
@@ -545,8 +563,9 @@ def append_row_values(
     crm_row_id: uuid.UUID,
     changed_fields: dict[str, Any],
 ) -> tuple[str, list[Any]]:
+    writeback_map = effective_writeback_column_map(source)
     mapped = {
-        column_number(source.writeback_column_map[field_name]): value
+        column_number(writeback_map[field_name]): sheet_cell_value(value)
         for field_name, value in changed_fields.items()
     }
     identity_column = column_number(source.crm_row_id_column)
@@ -586,10 +605,11 @@ async def process_writeback_event(
         event.status = SheetWritebackStatus.FAILED
         event.error = "Scenario source identity is inconsistent"
         return event
+    writeback_map = effective_writeback_column_map(source)
     approved = {
         key: value
         for key, value in event.changed_fields.items()
-        if key in source.writeback_column_map and key in WRITEBACK_FIELDS
+        if key in writeback_map and key in WRITEBACK_FIELDS
     }
     if set(approved) != set(event.changed_fields):
         event.status = SheetWritebackStatus.FAILED
@@ -645,14 +665,27 @@ async def process_writeback_event(
         {
             "range": (
                 f"'{escaped_tab}'!"
-                f"{column_letters(source.writeback_column_map[field_name])}"
+                f"{column_letters(writeback_map[field_name])}"
                 f"{scenario.source_row}"
             ),
             "majorDimension": "ROWS",
-            "values": [[value]],
+            "values": [[sheet_cell_value(value)]],
         }
         for field_name, value in approved.items()
     ]
+    updates.extend(
+        {
+            "range": (
+                f"'{escaped_tab}'!"
+                f"{column_letters(writeback_map[field_name])}"
+                f"{source.header_row}"
+            ),
+            "majorDimension": "ROWS",
+            "values": [[header]],
+        }
+        for field_name, header in MANAGED_EXTENSION_HEADERS.items()
+        if field_name in approved
+    )
     updates.insert(
         0,
         {
@@ -686,3 +719,50 @@ async def process_writeback_event(
     source.last_error = None
     source.last_sync_at = event.processed_at
     return event
+
+
+def sheet_cell_value(value: Any) -> Any:
+    """Google values API uses an empty string to clear a stale cell."""
+    return "" if value is None else value
+
+
+def scenario_writeback_snapshot(
+    scenario: Scenario,
+    *,
+    include_empty: bool = True,
+    scenarist_name: str | None = None,
+) -> dict[str, Any]:
+    """Serialize every Google-visible value without exposing assignment UUIDs."""
+    approvals = {
+        item.stage.value: item
+        for item in getattr(scenario, "approvals", ())
+    }
+    values: dict[str, Any] = {}
+    for item in SHEET_FIELDS:
+        if item.field in WRITEBACK_ID_FIELDS:
+            continue
+        if item.field.startswith("approval."):
+            _, stage, attribute = item.field.split(".")
+            value = getattr(approvals.get(stage), attribute, None)
+        else:
+            value: Any = scenario
+            for part in item.field.split("."):
+                value = getattr(value, part, None)
+                if value is None:
+                    break
+        if hasattr(value, "value"):
+            value = value.value
+        if value is not None or include_empty:
+            values[item.field] = value
+    if scenarist_name is not None:
+        values["scenarist.name"] = scenarist_name
+    return values
+
+
+def crm_owned_writeback_snapshot(scenario: Scenario) -> dict[str, Any]:
+    """Backfill CRM-owned cells without overwriting scenarist Sheet drafts."""
+    return {
+        field: value
+        for field, value in scenario_writeback_snapshot(scenario).items()
+        if field in CRM_OWNED_WRITEBACK_FIELDS
+    }

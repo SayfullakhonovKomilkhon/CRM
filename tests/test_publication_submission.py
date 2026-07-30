@@ -74,12 +74,17 @@ def test_submit_publication_moves_exact_row_to_publisher_manager(monkeypatch):
         preparation_status=PublicationPreparationStatus.REVISION,
     )
     session = FakeSession(scenario)
+    writebacks = []
 
     async def visible(_session, _scenario_id, _user, *, for_update=False):
         assert for_update is True
         return scenario
 
+    async def enqueue(_session, queued_scenario, changes):
+        writebacks.append((queued_scenario.id, changes))
+
     monkeypatch.setattr(routes, "get_visible_scenario", visible)
+    monkeypatch.setattr(routes, "enqueue_sheet_writeback", enqueue)
     monkeypatch.setattr(routes, "scenario_for_role", lambda value, _user: value)
 
     result = asyncio.run(
@@ -97,6 +102,15 @@ def test_submit_publication_moves_exact_row_to_publisher_manager(monkeypatch):
     )
     assert scenario.publication.manager_review_decision == PublicationReviewDecision.PENDING
     assert scenario.publication.manager_review_comment is None
+    assert len(writebacks) == 1
+    assert (
+        writebacks[0][1]["publication.preparation_status"]
+        == PublicationPreparationStatus.READY_FOR_REVIEW.value
+    )
+    assert (
+        writebacks[0][1]["publication.manager_review_decision"]
+        == PublicationReviewDecision.PENDING.value
+    )
     assert session.commits == 1
 
 

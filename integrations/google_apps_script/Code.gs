@@ -57,6 +57,50 @@ const CRM_SCENARIST_INBOUND_FIELDS = new Set([
   "publication.ai_social_descriptions",
   "publication.leia_script"
 ]);
+const CRM_CANONICAL_INBOUND_COLUMN_MAP = {
+  "1": "scenario_date",
+  "2": "external_id",
+  "3": "research.competitor_url",
+  "4": "research.competitor_category",
+  "5": "scenario_type",
+  "6": "visual_format",
+  "7": "research.full_analysis",
+  "8": "research.performance_metrics",
+  "9": "research.transcription",
+  "10": "research.timeline",
+  "11": "research.why_viral",
+  "12": "research.takeaways",
+  "13": "research.improvements",
+  "14": "research.replication_template",
+  "15": "research.ai_analysis",
+  "17": "content.claude_context",
+  "18": "speaker",
+  "19": "content.cover_text",
+  "20": "content.script_text",
+  "21": "content.montage_brief",
+  "22": "content.scenarist_comment",
+  "23": "content.hook",
+  "24": "content.retention",
+  "25": "content.call_to_action",
+  "26": "content.visual_notes",
+  "27": "content.score_recommendations",
+  "28": "content.ai_review",
+  "37": "montage.source_material_url",
+  "38": "deadline",
+  "39": "montage.client_brand_style",
+  "40": "montage.extra_brief",
+  "44": "montage.scenarist_material_comment",
+  "53": "montage.scenarist_revision_status",
+  "54": "montage.scenarist_revision_comment",
+  "59": "publication.publisher_brief",
+  "60": "publication.description_dzen",
+  "61": "publication.description_youtube",
+  "62": "publication.description_tiktok",
+  "63": "publication.description_instagram",
+  "80": "publication.ai_social_descriptions",
+  "81": "publication.leia_script",
+  "96": "score"
+};
 const CRM_SUBMISSION_HEADER = "Отправка на согласование";
 const CRM_SUBMISSION_READY_VALUE = "Отправить";
 
@@ -258,10 +302,18 @@ function submissionColumn_(sheet, headerRow, props) {
 }
 
 function withRequiredSourceColumns_(sheet, headerRow, configuredMap) {
-  const map = Object.assign({}, configuredMap);
-  if (Object.values(map).includes("external_id")) return map;
   const headers = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn())
     .getDisplayValues()[0];
+  const canonicalLayout = (
+    normalizeText_(headers[1]) === "id" &&
+    normalizeText_(headers[19]) === "сценарий"
+  );
+  const map = Object.assign(
+    {},
+    canonicalLayout ? CRM_CANONICAL_INBOUND_COLUMN_MAP : {},
+    configuredMap
+  );
+  if (Object.values(map).includes("external_id")) return map;
   const idAliases = new Set(["id", "ид", "номер"]);
   const matches = [];
   headers.forEach((header, index) => {

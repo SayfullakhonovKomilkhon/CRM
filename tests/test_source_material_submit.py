@@ -80,15 +80,12 @@ def test_submit_source_material_moves_exact_row_to_review(monkeypatch):
     assert result is scenario
     assert scenario.montage.material_status == SourceMaterialStatus.READY_FOR_REVIEW
     assert session.commits == 1
-    assert writebacks == [
-        (
-            scenario.id,
-            {
-                "montage.material_status": "ready_for_review",
-                "approval.source_material.decision": "pending",
-            },
-        )
-    ]
+    assert len(writebacks) == 1
+    writeback_id, changes = writebacks[0]
+    assert writeback_id == scenario.id
+    assert changes["montage.material_status"] == "ready_for_review"
+    assert changes["approval.source_material.decision"] == "pending"
+    assert "approval.final_client.decision" in changes
 
 
 @pytest.mark.parametrize(
