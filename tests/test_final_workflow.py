@@ -315,6 +315,30 @@ async def test_wrong_manager_level_cannot_review_publication() -> None:
     assert error.value.status_code == 403
 
 
+@pytest.mark.asyncio
+async def test_publication_revision_comment_is_optional() -> None:
+    scenario = SimpleNamespace(
+        approvals=[
+            approval(ApprovalStage.FINAL_CLIENT, ApprovalDecision.APPROVED),
+        ],
+        publication=publication(),
+        status=ScenarioStatus.APPROVED,
+    )
+
+    result = await apply_publication_manager_review(
+        SimpleNamespace(),
+        scenario,
+        PublicationManagerDecision.REVISION,
+        None,
+        None,
+        publisher_manager(),
+    )
+
+    assert result.manager_review_decision == PublicationReviewDecision.REVISION
+    assert result.manager_review_comment is None
+    assert scenario.status == ScenarioStatus.APPROVED
+
+
 @pytest.mark.parametrize(
     "stage",
     [
@@ -325,7 +349,23 @@ async def test_wrong_manager_level_cannot_review_publication() -> None:
         ApprovalStage.FINAL_CLIENT,
     ],
 )
-def test_revision_comment_is_required_for_every_active_review_stage(stage) -> None:
+def test_revision_comment_is_optional_for_every_active_review_stage(stage) -> None:
+    require_approval_comment(stage, ApprovalDecision.REVISION, "")
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        ApprovalStage.RESPONSIBLE_REVIEW,
+        ApprovalStage.PRE_GENERATION_CLIENT,
+        ApprovalStage.SOURCE_MATERIAL,
+        ApprovalStage.MONTAGE_COMPLIANCE,
+        ApprovalStage.FINAL_CLIENT,
+    ],
+)
+def test_rejected_comment_remains_required_for_every_active_review_stage(
+    stage,
+) -> None:
     with pytest.raises(HTTPException) as error:
-        require_approval_comment(stage, ApprovalDecision.REVISION, "")
+        require_approval_comment(stage, ApprovalDecision.REJECTED, "")
     assert error.value.status_code == 422

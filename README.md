@@ -129,6 +129,10 @@ with the `client` role. The request includes the company name/external ID plus t
 full name, email, and temporary password. Duplicate data or invalid credentials leave
 neither record partially created.
 
+Approval decisions with `revision` may omit a comment at every review stage. A supplied
+comment is still stored and synchronized. Terminal `rejected` decisions continue to require
+a reason.
+
 The full client and project catalogs are readable by all three manager levels and scenarists.
 Client users receive only their own client and projects. Editors and publishers receive
 `403` from both catalog endpoints. Write operations remain manager-only.

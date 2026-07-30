@@ -115,7 +115,7 @@ CLIENT_APPROVAL_STAGES = {
     ApprovalStage.FINAL_CLIENT,
 }
 
-REVISION_COMMENT_STAGES = {
+REJECTED_COMMENT_STAGES = {
     *CLIENT_APPROVAL_STAGES,
     ApprovalStage.RESPONSIBLE_REVIEW,
     ApprovalStage.SOURCE_MATERIAL,
@@ -148,13 +148,13 @@ def require_approval_comment(
     stage: ApprovalStage, decision: ApprovalDecision, comment: str | None
 ) -> None:
     if (
-        stage in REVISION_COMMENT_STAGES
-        and decision in {ApprovalDecision.REVISION, ApprovalDecision.REJECTED}
+        stage in REJECTED_COMMENT_STAGES
+        and decision == ApprovalDecision.REJECTED
         and not (comment or "").strip()
     ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="A revision decision requires a comment",
+            detail="A rejected decision requires a comment",
         )
 
 
@@ -278,11 +278,6 @@ async def apply_publication_manager_review(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Publication review is already approved; edit publication content to reopen it",
-        )
-    if decision == PublicationManagerDecision.REVISION and not (comment or "").strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Publication revision requires a manager comment",
         )
     if not is_approved(scenario, ApprovalStage.FINAL_CLIENT):
         raise HTTPException(
