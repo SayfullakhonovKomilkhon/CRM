@@ -666,6 +666,7 @@ def test_openapi_documents_management_webhook_and_event_contracts():
     assert "error" in accepted_schema["properties"]
     assert "/api/v1/google-sheets/inbound-events" in paths
     assert "/api/v1/google-sheets/writeback-events" in paths
+    assert "post" in paths["/api/v1/scenarios/{scenario_id}/sheet-sync/retry"]
 
 
 @pytest.mark.parametrize(
@@ -673,6 +674,7 @@ def test_openapi_documents_management_webhook_and_event_contracts():
     [
         scenario_routes.create_scenario,
         scenario_routes.patch_scenario_sheet_row,
+        scenario_routes.retry_scenario_sheet_sync,
         scenario_routes.update_scenario,
         scenario_routes.set_approval,
         scenario_routes.decide_final_revision_gate,

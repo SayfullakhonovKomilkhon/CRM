@@ -1719,6 +1719,73 @@ async def get_scenario(
     return scenario_for_role(scenario, user)
 
 
+@router.post(
+    "/{scenario_id}/sheet-sync/retry",
+    response_model=SheetRowPatchResult,
+)
+async def retry_scenario_sheet_sync(
+    scenario_id: uuid.UUID,
+    user: User = Depends(require_roles(Role.MANAGER)),
+    session: AsyncSession = Depends(get_session),
+) -> SheetRowPatchResult:
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+    if scenario.assigned_scenarist_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Assign a scenarist before retrying Google Sheets sync",
+        )
+    assigned_scenarist = require_assignable_scenarist(
+        await session.get(User, scenario.assigned_scenarist_id)
+    )
+    if scenario.sheet_source_id is None:
+        source = await exact_sheet_source_for_assignment(
+            session,
+            scenario.project_id,
+            assigned_scenarist.id,
+        )
+        scenario.sheet_source_id = source.id
+        scenario.crm_row_id = scenario.crm_row_id or uuid.uuid4()
+        scenario.source_sheet_id = source.spreadsheet_id
+        scenario.source_tab = source.source_tab
+        scenario.source_row = None
+    else:
+        source = await session.get(SheetSource, scenario.sheet_source_id)
+        if source is None or not source.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The scenario Google Sheets source is missing or disabled",
+            )
+        if source.assigned_scenarist_id != assigned_scenarist.id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Cannot sync a scenario to a Google Sheets source "
+                    "assigned to another scenarist"
+                ),
+            )
+
+    scenario.updated_at = datetime.now(UTC)
+    event = await enqueue_sheet_writeback(
+        session,
+        scenario,
+        loaded_scenario_writeback(
+            scenario,
+            scenarist_name=assigned_scenarist.full_name,
+        ),
+    )
+    if event is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The Google Sheets source has no mapped values for this scenario",
+        )
+    await session.commit()
+    return SheetRowPatchResult(
+        id=scenario.id,
+        version=scenario.updated_at,
+        changed_fields=[SYNC_STATUS_FIELD],
+    )
+
+
 @router.patch("/{scenario_id}", response_model=ScenarioRead)
 async def update_scenario(
     scenario_id: uuid.UUID,
