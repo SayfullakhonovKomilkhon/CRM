@@ -212,10 +212,9 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     )
 
     class InboundSession:
-        def __init__(self, event, existing=None, duplicate_id=None):
+        def __init__(self, event, existing=None):
             self.event = event
             self.existing = existing
-            self.duplicate_id = duplicate_id
             self.scalar_calls = 0
             self.added = []
 
@@ -225,7 +224,7 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
                 return self.event
             if self.scalar_calls == 2:
                 return self.existing
-            return self.duplicate_id
+            return None
 
         async def get(self, model, _identifier):
             assert model is SheetSource
@@ -277,17 +276,20 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert created.project_id == project_id
     assert created.assigned_scenarist_id == scenarist_id
 
-    duplicate_session = InboundSession(
+    repeated_display_id_session = InboundSession(
         inbound_event("Отправить", {"external_id": "147"}),
-        duplicate_id=uuid.uuid4(),
     )
-    duplicate = await process_inbound_event(
-        duplicate_session,
-        duplicate_session.event.id,
+    repeated_display_id = await process_inbound_event(
+        repeated_display_id_session,
+        repeated_display_id_session.event.id,
     )
-    assert duplicate.status == SheetEventStatus.FAILED
-    assert duplicate.error == "Google Sheet ID '147' already exists in CRM"
-    assert duplicate_session.added == []
+    repeated_scenario = next(
+        item
+        for item in repeated_display_id_session.added
+        if isinstance(item, Scenario)
+    )
+    assert repeated_display_id.status == SheetEventStatus.COMPLETED
+    assert repeated_scenario.external_id == "147"
 
     draft_session = InboundSession(inbound_event(""))
     skipped = await process_inbound_event(draft_session, draft_session.event.id)

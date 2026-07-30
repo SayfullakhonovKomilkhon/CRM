@@ -416,19 +416,6 @@ async def process_inbound_event(
         event.status = SheetEventStatus.FAILED
         event.error = "Google Sheet ID is required for a new scenario"
         return event
-    if incoming_external_id is not None:
-        duplicate_query = select(Scenario.id).where(
-            Scenario.external_id == incoming_external_id
-        )
-        if scenario is not None:
-            duplicate_query = duplicate_query.where(Scenario.id != scenario.id)
-        duplicate_id = await session.scalar(duplicate_query)
-        if duplicate_id is not None:
-            event.status = SheetEventStatus.FAILED
-            event.error = (
-                f"Google Sheet ID '{incoming_external_id}' already exists in CRM"
-            )
-            return event
     if scenario is not None and scenario.source_checksum == event.checksum:
         event.status = SheetEventStatus.SKIPPED
         event.error = "Checksum already applied"

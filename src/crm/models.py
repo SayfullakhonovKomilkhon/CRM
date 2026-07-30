@@ -186,14 +186,12 @@ class Project(TimestampMixin, Base):
 class Scenario(TimestampMixin, Base):
     __tablename__ = "scenarios"
     __table_args__ = (
-        UniqueConstraint("source_sheet_id", "source_tab", "external_id", name="uq_scenario_source"),
         UniqueConstraint(
             "source_sheet_id",
             "source_tab",
             "source_row",
             name="uq_scenario_source_row",
         ),
-        UniqueConstraint("external_id", name="uq_scenarios_external_id"),
         UniqueConstraint(
             "sheet_source_id",
             "crm_row_id",

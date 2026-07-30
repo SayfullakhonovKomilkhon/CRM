@@ -31,13 +31,14 @@ def test_scenario_external_id_is_readonly_for_every_role(role: Role) -> None:
     assert "external_id" not in editable_fields_for_role(scenario, role)
 
 
-def test_scenario_model_has_global_unique_required_generated_id() -> None:
+def test_scenario_model_has_non_unique_required_generated_display_id() -> None:
     external_id = Scenario.__table__.c.external_id
     constraint_names = {constraint.name for constraint in Scenario.__table__.constraints}
 
     assert external_id.nullable is False
     assert external_id.server_default is not None
-    assert "uq_scenarios_external_id" in constraint_names
+    assert "uq_scenarios_external_id" not in constraint_names
+    assert "uq_scenario_source" not in constraint_names
     assert "uq_scenario_project_external_id" not in constraint_names
 
 
