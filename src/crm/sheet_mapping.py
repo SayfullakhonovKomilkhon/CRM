@@ -176,7 +176,7 @@ def effective_writeback_column_map(source: Any) -> dict[str, int | str]:
         # employee name and preserve an external editor separately in BQ.
         configured.pop("montage.external_editor_name")
     if not use_canonical_layout:
-        return configured
+        return _protect_runtime_identity_column(source, configured)
     configured_columns = {
         _column_letters(reference) for reference in configured.values()
     }
@@ -185,7 +185,51 @@ def effective_writeback_column_map(source: Any) -> dict[str, int | str]:
         for field, column in CANONICAL_WRITEBACK_COLUMN_MAP.items()
         if field not in configured and column not in configured_columns
     }
-    return {**defaults, **configured}
+    return _protect_runtime_identity_column(source, {**defaults, **configured})
+
+
+def _protect_runtime_identity_column(
+    source: Any,
+    mapping: dict[str, int | str],
+) -> dict[str, int | str]:
+    """Keep legacy identity columns separate from workflow data.
+
+    Source creation/update validation already rejects collisions. Older
+    production sources predate that validation, though, and may use one of the
+    columns later assigned to a canonical CRM extension. Rehome only the
+    colliding workflow fields after the current mapping so existing identity
+    values are never overwritten.
+    """
+    identity = _column_letters(getattr(source, "crm_row_id_column", None))
+    if identity is None:
+        return mapping
+    collisions = [
+        field
+        for field, reference in mapping.items()
+        if _column_letters(reference) == identity
+    ]
+    if not collisions:
+        return mapping
+    protected = dict(mapping)
+    occupied = {
+        column
+        for reference in protected.values()
+        if (column := _column_letters(reference)) is not None
+    }
+    next_column = max(
+        [_column_number(column) for column in occupied | {identity}],
+        default=0,
+    ) + 1
+    for field in collisions:
+        while _column_letters(next_column) in occupied:
+            next_column += 1
+        replacement = _column_letters(next_column)
+        if replacement is None:
+            raise ValueError("Google Sheets column limit exceeded")
+        protected[field] = replacement
+        occupied.add(replacement)
+        next_column += 1
+    return protected
 
 
 def _column_letters(reference: Any) -> str | None:
@@ -199,3 +243,10 @@ def _column_letters(reference: Any) -> str | None:
         value, remainder = divmod(value - 1, 26)
         result = chr(65 + remainder) + result
     return result
+
+
+def _column_number(reference: str) -> int:
+    value = 0
+    for character in reference:
+        value = value * 26 + ord(character) - 64
+    return value

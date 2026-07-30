@@ -164,6 +164,21 @@ class GoogleSheetsSourceError(RuntimeError):
     pass
 
 
+def _google_api_error(response: httpx.Response) -> str:
+    """Expose Google's actionable message without leaking response metadata."""
+    message = ""
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = str(error.get("message") or "").strip()
+    except (TypeError, ValueError):
+        pass
+    suffix = f": {message[:500]}" if message else ""
+    return f"Google Sheets API returned HTTP {response.status_code}{suffix}"
+
+
 @dataclass
 class ParsedSheetRow:
     row_number: int
@@ -981,6 +996,7 @@ class GoogleSheetsClient:
                 "GOOGLE_SERVICE_ACCOUNT_JSON is not a valid service-account key"
             ) from error
         self._refresh_lock = asyncio.Lock()
+        self._grid_column_counts: dict[tuple[str, str], int] = {}
 
     async def _access_token(self) -> str:
         async with self._refresh_lock:
@@ -1090,10 +1106,94 @@ class GoogleSheetsClient:
                         "Service account cannot write to the configured spreadsheet"
                     )
                 if response.status_code >= 400:
-                    raise GoogleSheetsSourceError(
-                        f"Google Sheets API returned HTTP {response.status_code}"
-                    )
+                    raise GoogleSheetsSourceError(_google_api_error(response))
                 return
+
+    async def ensure_tab_column_capacity(
+        self,
+        spreadsheet_id: str,
+        tab: str,
+        required_column_count: int,
+    ) -> None:
+        """Expand a tab before writing A1 ranges beyond its current grid."""
+        if required_column_count < 1:
+            return
+        cache = getattr(self, "_grid_column_counts", None)
+        if cache is None:
+            cache = {}
+            self._grid_column_counts = cache
+        key = (spreadsheet_id, tab)
+        if cache.get(key, 0) >= required_column_count:
+            return
+        token = await self._access_token()
+        base_url = (
+            "https://sheets.googleapis.com/v4/spreadsheets/"
+            f"{quote(spreadsheet_id, safe='')}"
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                metadata = await client.get(
+                    base_url,
+                    headers=headers,
+                    params={
+                        "fields": (
+                            "sheets(properties(sheetId,title,"
+                            "gridProperties(columnCount)))"
+                        )
+                    },
+                )
+                if metadata.status_code in {401, 403}:
+                    raise GoogleSheetsSourceError(
+                        "Service account cannot read the configured spreadsheet"
+                    )
+                if metadata.status_code >= 400:
+                    raise GoogleSheetsSourceError(_google_api_error(metadata))
+                properties = next(
+                    (
+                        item.get("properties", {})
+                        for item in metadata.json().get("sheets", [])
+                        if item.get("properties", {}).get("title") == tab
+                    ),
+                    None,
+                )
+                if properties is None:
+                    raise GoogleSheetsSourceError(
+                        "Spreadsheet or configured tab was not found"
+                    )
+                current_count = int(
+                    properties.get("gridProperties", {}).get("columnCount", 0)
+                )
+                if current_count < required_column_count:
+                    expansion = await client.post(
+                        f"{base_url}:batchUpdate",
+                        headers=headers,
+                        json={
+                            "requests": [
+                                {
+                                    "appendDimension": {
+                                        "sheetId": properties["sheetId"],
+                                        "dimension": "COLUMNS",
+                                        "length": required_column_count
+                                        - current_count,
+                                    }
+                                }
+                            ]
+                        },
+                    )
+                    if expansion.status_code in {401, 403}:
+                        raise GoogleSheetsSourceError(
+                            "Service account cannot expand the configured spreadsheet"
+                        )
+                    if expansion.status_code >= 400:
+                        raise GoogleSheetsSourceError(_google_api_error(expansion))
+        except GoogleSheetsSourceError:
+            raise
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+            raise GoogleSheetsSourceError(
+                "Google Sheets grid capacity check failed"
+            ) from error
+        cache[key] = max(current_count, required_column_count)
 
     async def find_value_row(
         self,

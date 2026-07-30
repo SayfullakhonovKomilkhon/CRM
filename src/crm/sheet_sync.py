@@ -615,6 +615,23 @@ async def process_writeback_event(
         event.status = SheetWritebackStatus.FAILED
         event.error = "Writeback contains fields outside the source allowlist"
         return event
+    required_column_count = max(
+        column_number(source.crm_row_id_column),
+        *(column_number(writeback_map[field_name]) for field_name in approved),
+    )
+    try:
+        await client.ensure_tab_column_capacity(
+            source.spreadsheet_id,
+            source.source_tab,
+            required_column_count,
+        )
+    except GoogleSheetsSourceError as error:
+        event.status = SheetWritebackStatus.FAILED
+        event.error = str(error)
+        event.next_attempt_at = retry_at(event.attempts)
+        source.last_status = "writeback_failed"
+        source.last_error = str(error)
+        return event
     if scenario.source_row is None:
         await lock_source_append(session, source.id)
         identity_value = str(event.crm_row_id)

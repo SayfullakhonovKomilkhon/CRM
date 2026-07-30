@@ -29,7 +29,7 @@ from crm.sheet_sync import (
 )
 
 logger = logging.getLogger(__name__)
-CANONICAL_BACKFILL_VERSION = "canonical-role-writeback-v1"
+CANONICAL_BACKFILL_VERSION = "canonical-role-writeback-v2"
 BACKFILL_BATCH_SIZE = 200
 
 

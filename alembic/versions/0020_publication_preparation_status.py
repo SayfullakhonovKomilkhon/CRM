@@ -5,6 +5,7 @@ Revises: 0019_admin_submission
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "0020_publication_preparation"

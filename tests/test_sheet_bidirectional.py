@@ -529,6 +529,24 @@ def test_canonical_mapping_fills_missing_roles_but_preserves_explicit_overrides(
     assert protected_mapping["publication.publisher_status"] == "CL"
 
 
+def test_legacy_identity_column_is_never_reused_by_canonical_workflow_field():
+    source = SimpleNamespace(
+        header_row=4,
+        crm_row_id_column="CA",
+        writeback_column_map={
+            "external_id": "B",
+            "content.script_text": "T",
+        },
+    )
+
+    mapping = effective_writeback_column_map(source)
+
+    assert "CA" not in {
+        column_letters(reference) for reference in mapping.values()
+    }
+    assert mapping["final_revision_gate.decided_at"] == "CT"
+
+
 async def test_canonical_source_writes_crm_owned_role_field_not_in_stored_subset():
     source_id = uuid.uuid4()
     scenario_id = uuid.uuid4()
@@ -868,6 +886,67 @@ async def test_google_write_reports_429_after_retry_budget(monkeypatch):
         )
 
 
+async def test_google_write_expands_tab_before_new_role_columns(monkeypatch):
+    requests = []
+
+    class FakeHttpClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                200,
+                json={
+                    "sheets": [
+                        {
+                            "properties": {
+                                "sheetId": 42,
+                                "title": "сценарий",
+                                "gridProperties": {"columnCount": 81},
+                            }
+                        }
+                    ]
+                },
+            )
+
+        async def post(self, url, **kwargs):
+            requests.append((url, kwargs["json"]))
+            return httpx.Response(200, json={})
+
+    async def token(_self):
+        return "token"
+
+    monkeypatch.setattr(GoogleSheetsClient, "_access_token", token)
+    monkeypatch.setattr(
+        "crm.google_sheets.httpx.AsyncClient",
+        lambda **_kwargs: FakeHttpClient(),
+    )
+    client = object.__new__(GoogleSheetsClient)
+
+    await client.ensure_tab_column_capacity("sheet", "сценарий", 97)
+    await client.ensure_tab_column_capacity("sheet", "сценарий", 97)
+
+    assert requests == [
+        (
+            "https://sheets.googleapis.com/v4/spreadsheets/sheet:batchUpdate",
+            {
+                "requests": [
+                    {
+                        "appendDimension": {
+                            "sheetId": 42,
+                            "dimension": "COLUMNS",
+                            "length": 16,
+                        }
+                    }
+                ]
+            },
+        )
+    ]
+
+
 async def test_google_append_returns_created_row_and_identity_lookup(monkeypatch):
     responses = [
         httpx.Response(
@@ -972,6 +1051,12 @@ async def test_writeback_creates_or_recovers_new_sheet_row_idempotently(existing
         def __init__(self):
             self.append_calls = 0
             self.updates = []
+            self.capacity = None
+
+        async def ensure_tab_column_capacity(
+            self, _spreadsheet_id, _tab, required_column_count
+        ):
+            self.capacity = required_column_count
 
         async def find_value_row(self, *_args, **_kwargs):
             return existing_row
@@ -989,6 +1074,7 @@ async def test_writeback_creates_or_recovers_new_sheet_row_idempotently(existing
     assert result.status == SheetWritebackStatus.COMPLETED
     assert scenario.source_row == 128
     assert client.append_calls == (0 if existing_row else 1)
+    assert client.capacity == 79
     assert client.updates[0]["range"] == "'сценарий'!CA128"
 
 
@@ -1044,6 +1130,12 @@ async def test_role_writeback_clears_stale_value_and_ensures_extension_header():
     class RoleClient:
         def __init__(self):
             self.updates = []
+            self.capacity = None
+
+        async def ensure_tab_column_capacity(
+            self, _spreadsheet_id, _tab, required_column_count
+        ):
+            self.capacity = required_column_count
 
         async def batch_update_values(self, _spreadsheet_id, updates, **_kwargs):
             self.updates = updates
@@ -1052,6 +1144,7 @@ async def test_role_writeback_clears_stale_value_and_ensures_extension_header():
     result = await process_writeback_event(RoleSession(), event.id, client)
 
     assert result.status == SheetWritebackStatus.COMPLETED
+    assert client.capacity == column_number("CL")
     assert {
         item["range"]: item["values"]
         for item in client.updates
