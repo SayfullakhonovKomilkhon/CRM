@@ -318,7 +318,12 @@ def ensure_user_creation_allowed(
 ) -> None:
     if actor_role == Role.ADMIN:
         return
-    if actor_role == Role.MANAGER and requested_role == Role.SCENARIST:
+    managed_role = {
+        Role.MANAGER: Role.SCENARIST,
+        Role.EDITOR_MANAGER: Role.EDITOR,
+        Role.PUBLISHER_MANAGER: Role.PUBLISHER,
+    }.get(actor_role)
+    if managed_role == requested_role:
         return
     if (
         actor_role == Role.MANAGER
@@ -329,8 +334,8 @@ def ensure_user_creation_allowed(
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail=(
-            "A scenario manager can create scenarists only"
-            if actor_role == Role.MANAGER
+            f"A {actor_role.value} can create {managed_role.value} users only"
+            if managed_role is not None
             else "Only an administrator can create users"
         ),
     )
@@ -340,16 +345,28 @@ def ensure_user_creation_allowed(
 async def list_users(
     role: Role | None = None,
     active_only: bool = True,
-    actor: User = Depends(require_roles(Role.ADMIN, Role.MANAGER)),
+    actor: User = Depends(
+        require_roles(
+            Role.ADMIN,
+            Role.MANAGER,
+            Role.EDITOR_MANAGER,
+            Role.PUBLISHER_MANAGER,
+        )
+    ),
     session: AsyncSession = Depends(get_session),
 ) -> list[User]:
-    if actor.role == Role.MANAGER:
-        if role not in (None, Role.SCENARIST):
+    managed_role = {
+        Role.MANAGER: Role.SCENARIST,
+        Role.EDITOR_MANAGER: Role.EDITOR,
+        Role.PUBLISHER_MANAGER: Role.PUBLISHER,
+    }.get(actor.role)
+    if managed_role is not None:
+        if role not in (None, managed_role):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="A scenario manager can list scenarists only",
+                detail=f"A {actor.role.value} can list {managed_role.value} users only",
             )
-        role = Role.SCENARIST
+        role = managed_role
     query = select(User).order_by(User.full_name, User.email)
     if role is not None:
         query = query.where(User.role == role)

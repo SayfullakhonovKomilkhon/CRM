@@ -213,12 +213,19 @@ def test_admin_can_create_any_team_role() -> None:
         ensure_user_creation_allowed(Role.ADMIN, role, admin_exists=True)
 
 
-def test_scenario_manager_can_create_scenarist() -> None:
-    ensure_user_creation_allowed(
-        Role.MANAGER,
-        Role.SCENARIST,
-        admin_exists=True,
-    )
+@pytest.mark.parametrize(
+    ("manager_role", "subordinate_role"),
+    [
+        (Role.MANAGER, Role.SCENARIST),
+        (Role.EDITOR_MANAGER, Role.EDITOR),
+        (Role.PUBLISHER_MANAGER, Role.PUBLISHER),
+    ],
+)
+def test_each_manager_can_create_own_subordinate(
+    manager_role: Role,
+    subordinate_role: Role,
+) -> None:
+    ensure_user_creation_allowed(manager_role, subordinate_role, admin_exists=True)
 
 
 @pytest.mark.parametrize(
@@ -240,6 +247,28 @@ def test_scenario_manager_cannot_create_other_roles_when_admin_exists(
         ensure_user_creation_allowed(
             Role.MANAGER,
             role,
+            admin_exists=True,
+        )
+    assert error.value.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("manager_role", "forbidden_role"),
+    [
+        (Role.EDITOR_MANAGER, Role.SCENARIST),
+        (Role.EDITOR_MANAGER, Role.PUBLISHER),
+        (Role.PUBLISHER_MANAGER, Role.SCENARIST),
+        (Role.PUBLISHER_MANAGER, Role.EDITOR),
+    ],
+)
+def test_specialized_manager_cannot_create_another_team_role(
+    manager_role: Role,
+    forbidden_role: Role,
+) -> None:
+    with pytest.raises(HTTPException) as error:
+        ensure_user_creation_allowed(
+            manager_role,
+            forbidden_role,
             admin_exists=True,
         )
     assert error.value.status_code == 403
