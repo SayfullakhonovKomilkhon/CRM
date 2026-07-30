@@ -27,6 +27,11 @@ Demo accounts all use password `demo12345`:
 - `client@crm.local`
 - `publisher@crm.local`
 
+The demo administrator is seeded only outside production. After the role
+migration, an existing scenario manager may create the first production
+administrator through `POST /api/v1/users`; once any administrator exists,
+user administration becomes administrator-only.
+
 The frontend base URL is `http://localhost:8000/api/v1`.
 
 ## Initial API

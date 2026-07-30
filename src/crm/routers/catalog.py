@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from crm.creation import require_active_client
 from crm.database import get_session
-from crm.dependencies import require_roles
+from crm.dependencies import get_current_user, require_roles
 from crm.models import Client, Project, Role, User
 from crm.schemas import (
     ClientCreate,
@@ -269,9 +269,22 @@ async def list_users(
 @router.post("/users", response_model=UserAdminRead, status_code=status.HTTP_201_CREATED)
 async def create_user(
     payload: UserAdminCreate,
-    _: User = Depends(require_roles(Role.ADMIN)),
+    actor: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ) -> User:
+    if actor.role != Role.ADMIN:
+        existing_admin = await session.scalar(
+            select(User.id).where(User.role == Role.ADMIN).limit(1)
+        )
+        if (
+            actor.role != Role.MANAGER
+            or payload.role != Role.ADMIN
+            or existing_admin is not None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only an administrator can create users",
+            )
     email = str(payload.email).lower()
     duplicate = await session.scalar(
         select(User.id).where(func.lower(User.email) == email)

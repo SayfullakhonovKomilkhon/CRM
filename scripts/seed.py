@@ -2,6 +2,7 @@ import asyncio
 
 from sqlalchemy import select
 
+from crm.config import settings
 from crm.database import SessionLocal
 from crm.models import Client, Project, Role, User
 from crm.security import hash_password
@@ -38,7 +39,12 @@ async def seed() -> None:
         if demo_project is None:
             session.add(Project(client_id=demo_client.id, name="Демо-проект"))
 
-        for email, full_name, role in DEMO_USERS:
+        demo_users = (
+            DEMO_USERS
+            if settings.app_env.lower() != "production"
+            else [item for item in DEMO_USERS if item[2] != Role.ADMIN]
+        )
+        for email, full_name, role in demo_users:
             existing = await session.scalar(select(User).where(User.email == email))
             if existing is None:
                 existing = User(
