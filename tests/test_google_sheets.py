@@ -11,6 +11,7 @@ from crm.google_sheets import (
     GoogleSheetsConfigurationError,
     GoogleSheetsSourceError,
     _apply_workflow_values,
+    advance_external_id_sequence,
     canonical_checksum,
     parse_date,
     parse_sheet_values,
@@ -143,6 +144,7 @@ def test_parse_sheet_values_imports_only_scenarist_owned_fields_and_identity():
 
 
 def test_sheet_inbound_allowlist_excludes_other_role_fields():
+    assert "external_id" in SAFE_IMPORT_FIELDS
     assert "content.script_text" in SAFE_IMPORT_FIELDS
     assert "montage.source_material_url" in SAFE_IMPORT_FIELDS
     assert "publication.publisher_brief" in SAFE_IMPORT_FIELDS
@@ -151,6 +153,58 @@ def test_sheet_inbound_allowlist_excludes_other_role_fields():
     assert "montage.price" not in SAFE_IMPORT_FIELDS
     assert "publication.is_published" not in SAFE_IMPORT_FIELDS
     assert "publication.publisher_status" not in SAFE_IMPORT_FIELDS
+
+
+def test_google_sheet_visible_id_becomes_scenario_external_id():
+    snapshot = parse_sheet_values(
+        [
+            ["ID", "Сценарий", "Отправка на согласование"],
+            ["147", "Сценарий с Google ID", "Отправить"],
+        ],
+        tab_config(),
+        "sheet-id",
+        100,
+    )
+
+    row = snapshot.rows[0]
+    assert row.errors == []
+    assert row.payload["external_id"] == "147"
+
+
+def test_submitted_google_row_rejects_an_empty_configured_id():
+    snapshot = parse_sheet_values(
+        [
+            ["ID", "Сценарий", "Отправка на согласование"],
+            ["", "Сценарий без ID", "Отправить"],
+        ],
+        tab_config(),
+        "sheet-id",
+        100,
+    )
+
+    row = snapshot.rows[0]
+    assert row.payload is None
+    assert "external_id: ID cannot be empty" in row.errors
+
+
+async def test_numeric_google_id_advances_postgresql_sequence():
+    class SequenceSession:
+        def __init__(self):
+            self.calls = []
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+
+    session = SequenceSession()
+    await advance_external_id_sequence(session, "147")
+    await advance_external_id_sequence(session, "client-row")
+
+    assert len(session.calls) == 1
+    assert "scenario_external_id_seq" in session.calls[0][0]
+    assert session.calls[0][1] == {"external_id": 147}
 
 
 def test_existing_identified_row_is_skipped_without_submission_marker():

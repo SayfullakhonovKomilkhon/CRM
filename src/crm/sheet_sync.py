@@ -22,6 +22,7 @@ from crm.google_sheets import (
     GoogleSheetsSourceError,
     _apply_workflow_values,
     _nested_payload,
+    advance_external_id_sequence,
     canonical_checksum,
     coerce_value,
     submission_requested,
@@ -274,6 +275,10 @@ def _set_values(scenario: Scenario, changed_fields: dict[str, Any]) -> None:
             content_values[field_name.split(".", 1)[1]] = value
         else:
             workflow_values[field_name] = value
+    external_id_supplied = "external_id" in scenario_values
+    external_id = scenario_values.pop("external_id", None)
+    if external_id_supplied and external_id is None:
+        raise ValueError("external_id cannot be empty")
     validated = ScenarioCreate(
         project_id=scenario.project_id,
         assigned_scenarist_id=scenario.assigned_scenarist_id,
@@ -291,6 +296,8 @@ def _set_values(scenario: Scenario, changed_fields: dict[str, Any]) -> None:
     content_values = validated_data.get("content") or {} if content_values else {}
     for field_name, value in scenario_values.items():
         setattr(scenario, field_name, value)
+    if external_id_supplied:
+        scenario.external_id = external_id
     if research_values:
         scenario.research = scenario.research or ScenarioResearch()
         for field_name, value in research_values.items():
@@ -366,8 +373,11 @@ async def process_inbound_event(
         event.error = "Sheet row is not marked 'Отправить' for approval"
         event.processed_at = datetime.now(UTC)
         return event
+    configured_inbound_fields = set(source.inbound_column_map)
+    if "external_id" in (getattr(source, "writeback_column_map", None) or {}):
+        configured_inbound_fields.add("external_id")
     allowed = (
-        set(source.inbound_column_map)
+        configured_inbound_fields
         & set(SAFE_IMPORT_FIELDS)
         - set(REALTIME_SERVER_CONTROLLED_FIELDS)
     )
@@ -401,6 +411,24 @@ async def process_inbound_event(
         )
         .with_for_update()
     )
+    incoming_external_id = inbound_fields.get("external_id")
+    if scenario is None and incoming_external_id is None:
+        event.status = SheetEventStatus.FAILED
+        event.error = "Google Sheet ID is required for a new scenario"
+        return event
+    if incoming_external_id is not None:
+        duplicate_query = select(Scenario.id).where(
+            Scenario.external_id == incoming_external_id
+        )
+        if scenario is not None:
+            duplicate_query = duplicate_query.where(Scenario.id != scenario.id)
+        duplicate_id = await session.scalar(duplicate_query)
+        if duplicate_id is not None:
+            event.status = SheetEventStatus.FAILED
+            event.error = (
+                f"Google Sheet ID '{incoming_external_id}' already exists in CRM"
+            )
+            return event
     if scenario is not None and scenario.source_checksum == event.checksum:
         event.status = SheetEventStatus.SKIPPED
         event.error = "Checksum already applied"
@@ -443,6 +471,7 @@ async def process_inbound_event(
         scenario.source_payload = source_payload
         if scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
             submit_for_responsible_review(scenario)
+        await advance_external_id_sequence(session, scenario.external_id)
     except (ValueError, ValidationError) as error:
         if scenario_was_new:
             session.expunge(scenario)

@@ -14,6 +14,7 @@ const CRM_SCHEMA_VERSION = 1;
 const CRM_RECONCILE_HANDLER = "reconcileCrmRows";
 const CRM_RECONCILE_DEFAULT_BATCH_SIZE = 100;
 const CRM_SCENARIST_INBOUND_FIELDS = new Set([
+  "external_id",
   "scenario_date",
   "speaker",
   "deadline",
@@ -80,7 +81,11 @@ function onCrmEdit(event) {
 
   // Google API/script writes do not fire installable onEdit triggers. This cache marker
   // is an additional guard for explicit CRM-origin script operations.
-  const map = JSON.parse(props.getProperty("CRM_INBOUND_COLUMN_MAP") || "{}");
+  const map = withRequiredSourceColumns_(
+    sheet,
+    headerRow,
+    JSON.parse(props.getProperty("CRM_INBOUND_COLUMN_MAP") || "{}")
+  );
   const rowIdColumn = columnNumber_(props.getProperty("CRM_ROW_ID_COLUMN") || "A");
   const submissionColumn = submissionColumn_(sheet, headerRow, props);
   const firstRow = Math.max(event.range.getRow(), headerRow + 1);
@@ -122,7 +127,11 @@ function reconcileCrmRows() {
     const headerRow = Number(props.getProperty("CRM_HEADER_ROW") || "1");
     const lastRow = sheet.getLastRow();
     if (lastRow <= headerRow) return;
-    const map = JSON.parse(props.getProperty("CRM_INBOUND_COLUMN_MAP") || "{}");
+    const map = withRequiredSourceColumns_(
+      sheet,
+      headerRow,
+      JSON.parse(props.getProperty("CRM_INBOUND_COLUMN_MAP") || "{}")
+    );
     const rowIdColumn = columnNumber_(props.getProperty("CRM_ROW_ID_COLUMN") || "A");
     const submissionColumn = submissionColumn_(sheet, headerRow, props);
     const configuredBatch = Number(
@@ -246,6 +255,20 @@ function submissionColumn_(sheet, headerRow, props) {
     );
   }
   return matches[0];
+}
+
+function withRequiredSourceColumns_(sheet, headerRow, configuredMap) {
+  const map = Object.assign({}, configuredMap);
+  if (Object.values(map).includes("external_id")) return map;
+  const headers = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn())
+    .getDisplayValues()[0];
+  const idAliases = new Set(["id", "ид", "номер"]);
+  const matches = [];
+  headers.forEach((header, index) => {
+    if (idAliases.has(normalizeText_(header))) matches.push(index + 1);
+  });
+  if (matches.length === 1) map[String(matches[0])] = "external_id";
+  return map;
 }
 
 function isSubmissionRequested_(value) {

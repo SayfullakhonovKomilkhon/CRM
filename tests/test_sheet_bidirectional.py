@@ -152,6 +152,7 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert "rowIdAppearsEarlier_" in script
     assert "One malformed or workflow-locked row must not block rows below it." in script
     assert "const CRM_SCENARIST_INBOUND_FIELDS = new Set([" in script
+    assert '"external_id"' in script
     assert '"content.script_text"' in script
     assert '"montage.source_material_url"' in script
     assert '"approval.responsible_review.decision"' not in script
@@ -204,22 +205,27 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
         source_tab="сценарий",
         project_id=project_id,
         assigned_scenarist_id=scenarist_id,
-        inbound_column_map={"speaker": "B"},
+        inbound_column_map={"external_id": "B", "speaker": "C"},
         last_status=None,
         last_error=None,
         last_event_at=None,
     )
 
     class InboundSession:
-        def __init__(self, event, existing=None):
+        def __init__(self, event, existing=None, duplicate_id=None):
             self.event = event
             self.existing = existing
+            self.duplicate_id = duplicate_id
             self.scalar_calls = 0
             self.added = []
 
         async def scalar(self, _query):
             self.scalar_calls += 1
-            return self.event if self.scalar_calls == 1 else self.existing
+            if self.scalar_calls == 1:
+                return self.event
+            if self.scalar_calls == 2:
+                return self.existing
+            return self.duplicate_id
 
         async def get(self, model, _identifier):
             assert model is SheetSource
@@ -255,7 +261,9 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
             processed_at=None,
         )
 
-    submitted_session = InboundSession(inbound_event("Отправить"))
+    submitted_session = InboundSession(
+        inbound_event("Отправить", {"external_id": "147"})
+    )
     submitted = await process_inbound_event(
         submitted_session,
         submitted_session.event.id,
@@ -265,8 +273,21 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     )
     assert submitted.status == SheetEventStatus.COMPLETED
     assert created.status == ScenarioStatus.IN_REVIEW
+    assert created.external_id == "147"
     assert created.project_id == project_id
     assert created.assigned_scenarist_id == scenarist_id
+
+    duplicate_session = InboundSession(
+        inbound_event("Отправить", {"external_id": "147"}),
+        duplicate_id=uuid.uuid4(),
+    )
+    duplicate = await process_inbound_event(
+        duplicate_session,
+        duplicate_session.event.id,
+    )
+    assert duplicate.status == SheetEventStatus.FAILED
+    assert duplicate.error == "Google Sheet ID '147' already exists in CRM"
+    assert duplicate_session.added == []
 
     draft_session = InboundSession(inbound_event(""))
     skipped = await process_inbound_event(draft_session, draft_session.event.id)
@@ -299,8 +320,9 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert existing.status == ScenarioStatus.DRAFT
 
     source.inbound_column_map = {
-        "speaker": "B",
-        "approval.responsible_review.decision": "C",
+        "external_id": "B",
+        "speaker": "C",
+        "approval.responsible_review.decision": "D",
     }
     legacy_row_id = uuid.uuid4()
     legacy_existing = Scenario(
@@ -337,9 +359,10 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
 def test_inbound_allowlist_accepts_scenarist_fields_and_rejects_role_workflow():
     validate_column_map(
         {
-            "content.script_text": "B",
-            "montage.source_material_url": "C",
-            "publication.publisher_brief": "D",
+            "external_id": "B",
+            "content.script_text": "C",
+            "montage.source_material_url": "D",
+            "publication.publisher_brief": "E",
         },
         allowed_fields=SAFE_IMPORT_FIELDS,
     )

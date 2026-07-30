@@ -40,14 +40,16 @@ from crm.sheet import SCENARIST_OWNED_FIELD_NAMES, SHEET_FIELDS
 from crm.workflow import submit_for_responsible_review
 
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+SCENARIO_EXTERNAL_ID_SEQUENCE = "scenario_external_id_seq"
 
 SAFE_IMPORT_FIELDS = tuple(
     item.field
     for item in SHEET_FIELDS
-    if item.field in SCENARIST_OWNED_FIELD_NAMES
+    if item.field in SCENARIST_OWNED_FIELD_NAMES or item.field == "external_id"
 )
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "external_id": ("id", "ид", "номер"),
     "scenario_date": ("дата", "дата создания"),
     "deadline": ("дата дедлайна", "дедлайн"),
     "score": ("общий балл", "общий бал"),
@@ -138,6 +140,7 @@ APPROVAL_DECISION_FIELDS = {
     if field_name.startswith("approval.") and field_name.endswith(".decision")
 }
 SCENARIO_FIELDS = {
+    "external_id",
     "scenario_date",
     "deadline",
     "score",
@@ -204,6 +207,27 @@ def normalize_header(value: Any) -> str:
 
 def submission_requested(value: Any) -> bool:
     return normalize_header(value) in SUBMISSION_READY_VALUES
+
+
+async def advance_external_id_sequence(
+    session: AsyncSession,
+    external_id: str | None,
+) -> None:
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    if external_id is None or not external_id.isdecimal():
+        return
+    numeric_id = int(external_id)
+    if not 1 <= numeric_id <= 9_223_372_036_854_775_807:
+        return
+    await session.execute(
+        text(
+            f"SELECT setval('{SCENARIO_EXTERNAL_ID_SEQUENCE}', "
+            f"GREATEST((SELECT last_value FROM {SCENARIO_EXTERNAL_ID_SEQUENCE}), "
+            ":external_id), true)"
+        ),
+        {"external_id": numeric_id},
+    )
 
 
 def submission_column_index(headers: list[Any]) -> int:
@@ -410,6 +434,8 @@ def coerce_value(field_name: str, value: Any) -> Any:
     if value is None:
         return None
     normalized = str(value).strip()
+    if field_name == "external_id" and len(normalized) > 100:
+        raise ValueError("expected at most 100 characters")
     return normalized or None
 
 
@@ -532,6 +558,9 @@ def parse_sheet_values(
                 for key in ("approval", "montage", "publication")
                 if key in nested
             }
+            external_id = nested.pop("external_id", None)
+            if "external_id" in resolved and external_id is None:
+                errors.append("external_id: ID cannot be empty")
             validated = ScenarioCreate(
                 project_id=config.project_id,
                 assigned_scenarist_id=config.assigned_scenarist_id,
@@ -542,6 +571,8 @@ def parse_sheet_values(
                 exclude_unset=True,
                 exclude={"project_id", "assigned_scenarist_id"},
             )
+            if external_id is not None:
+                candidate_payload["external_id"] = external_id
             candidate_payload.update(workflow_payload)
             if not errors:
                 validated_payload = candidate_payload
@@ -895,6 +926,7 @@ async def apply_planned_rows(
             _apply_workflow_values(scenario, payload)
             if scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
                 submit_for_responsible_review(scenario)
+        await advance_external_id_sequence(session, scenario.external_id)
     await session.flush()
     return [item.result() for item in planned]
 

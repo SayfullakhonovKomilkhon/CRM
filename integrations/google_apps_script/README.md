@@ -25,3 +25,8 @@ The script sends only the fields in `CRM_SCENARIST_INBOUND_FIELDS`. Approval,
 assignment, editor, client, manager, and publisher fields are CRM-owned:
 changes to those Sheet cells never travel to CRM. CRM may still write all
 configured role fields to Google through `writeback_column_map`.
+
+The visible Google column `ID` is detected automatically and sent as
+`external_id`. It is separate from the protected UUID column. A submitted new
+row must have a visible ID; CRM stores exactly that value and advances its
+numeric ID sequence so later CRM-created rows do not collide.

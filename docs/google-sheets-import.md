@@ -100,12 +100,18 @@ serializes concurrent syncs for the same spreadsheet/tab. A changed source or CR
   `Отправить` (case and surrounding whitespace are ignored).
 - Rows without that marker are skipped before validation. This also applies to
   rows that already have a protected `crm_row_id`.
+- The visible `ID` column is imported as `scenarios.external_id`. A submitted
+  new row with a configured but empty ID is rejected. IDs must be globally
+  unique; a duplicate is reported instead of silently renumbering the row.
+- The protected `crm_row_id` UUID remains a separate technical identity and is
+  never shown as the business ID.
 - CRM changes write back to Google automatically. Google changes remain in the
   Sheet until the scenarist selects `Отправить`; that action transfers the
   scenarist-owned fields and submits a draft or revision to the next stage.
 - Identity is `(source_sheet_id, source_tab, source_row)` with a database unique constraint.
 - A canonical SHA-256 checksum makes unchanged reimports `skipped`.
-- New scenarios receive the normal server-generated sequential `external_id`.
+- Sheet-created scenarios preserve the visible Google `ID` as `external_id`;
+  scenarios created in the web CRM receive the next sequence value.
 - Source metadata and checksum are controlled only by the adapter.
 - A changed safe source row can update an imported scenario only before workflow starts.
 - The presence of any approval, montage, publication, revision gate, or non-initial status locks
