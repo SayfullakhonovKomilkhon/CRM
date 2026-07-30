@@ -117,6 +117,15 @@ def reset_approvals_from(scenario: Scenario, stage: ApprovalStage) -> None:
     _unpublish(scenario)
 
 
+def submit_for_responsible_review(scenario: Scenario) -> None:
+    """Move one explicitly submitted draft/revision into the manager queue."""
+    reset_downstream_approvals(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+    approval = approval_for(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
+    if approval is not None:
+        _reset_approval(approval)
+    scenario.status = ScenarioStatus.IN_REVIEW
+
+
 def require_stage_role(role: Role, stage: ApprovalStage) -> None:
     if stage not in ROLE_APPROVAL_STAGES.get(role, set()):
         raise HTTPException(

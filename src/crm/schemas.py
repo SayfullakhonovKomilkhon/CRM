@@ -279,7 +279,7 @@ class SheetWebhookEvent(WriteModel):
     schema_version: Literal[1]
     row_id: uuid.UUID
     row_number: int = Field(ge=1)
-    changed_fields: dict[str, Any] = Field(min_length=1)
+    changed_fields: dict[str, Any] = Field(default_factory=dict)
     raw: dict[str, Any] = Field(default_factory=dict)
     checksum: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
     origin: Literal["sheets", "crm"]

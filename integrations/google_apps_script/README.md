@@ -12,3 +12,10 @@ The `crm_row_id` column is protected identity, not a workflow field. Do not map
 it in either inbound or writeback maps. Google API writes do not invoke
 installable `onEdit` triggers; the origin marker is an additional suppression
 guard for any future Apps Script write helper.
+
+Rows are sent to CRM only when the header row contains exactly one
+`Отправка на согласование` column and that row contains `Отправить`. The marker
+is cleared after a successful webhook response, so later draft edits stay in
+Google Sheets until the scenarist explicitly submits the row again. When header
+lookup is not suitable, `CRM_SUBMISSION_COLUMN` may contain the column letters
+(for example, `AC`).

@@ -36,6 +36,7 @@ from crm.schemas import (
     GoogleSheetsRowResult,
     ScenarioCreate,
 )
+from crm.workflow import submit_for_responsible_review
 
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
@@ -205,6 +206,11 @@ SCENARIO_FIELDS = {
     "speaker",
 }
 UNLOCKED_IMPORT_STATUSES = {ScenarioStatus.DRAFT, ScenarioStatus.IN_REVIEW}
+SUBMISSION_HEADER_ALIASES = (
+    "отправка на согласование",
+    "отправить на согласование",
+)
+SUBMISSION_READY_VALUES = frozenset({"отправить", "send"})
 
 
 class GoogleSheetsConfigurationError(ValueError):
@@ -222,6 +228,7 @@ class ParsedSheetRow:
     checksum: str | None
     title: str | None
     crm_row_id: uuid.UUID | None = None
+    submission_requested: bool = False
     source_payload: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
@@ -253,6 +260,25 @@ class PlannedRow:
 
 def normalize_header(value: Any) -> str:
     return re.sub(r"[^\w]+", " ", str(value or "").casefold()).strip()
+
+
+def submission_requested(value: Any) -> bool:
+    return normalize_header(value) in SUBMISSION_READY_VALUES
+
+
+def submission_column_index(headers: list[Any]) -> int:
+    aliases = {normalize_header(alias) for alias in SUBMISSION_HEADER_ALIASES}
+    matches = [
+        index
+        for index, header in enumerate(headers)
+        if normalize_header(header) in aliases
+    ]
+    if len(matches) != 1:
+        raise GoogleSheetsConfigurationError(
+            "The header row must contain exactly one "
+            "'Отправка на согласование' column"
+        )
+    return matches[0]
 
 
 def canonical_checksum(value: Any) -> str:
@@ -501,12 +527,16 @@ def parse_sheet_values(
         raise GoogleSheetsSourceError("The configured header row is empty")
     headers = values[0]
     resolved, warnings = resolve_columns(headers, config)
+    submission_index = submission_column_index(headers)
     data_rows = values[1:]
     if len(data_rows) > max_rows:
         if any(
-            str(value).strip()
+            submission_requested(
+                overflow[submission_index]
+                if submission_index < len(overflow)
+                else None
+            )
             for overflow in data_rows[max_rows:]
-            for value in overflow
         ):
             raise GoogleSheetsSourceError(
                 f"Tab exceeds GOOGLE_SHEETS_MAX_ROWS={max_rows}"
@@ -519,6 +549,21 @@ def parse_sheet_values(
         if not any(str(value).strip() for value in row):
             continue
         source_payload = _source_payload(headers, row)
+        is_submitted = submission_requested(
+            row[submission_index] if submission_index < len(row) else None
+        )
+        if not is_submitted:
+            parsed_rows.append(
+                ParsedSheetRow(
+                    row_number=row_number,
+                    payload=None,
+                    checksum=None,
+                    title=None,
+                    submission_requested=False,
+                    source_payload=source_payload,
+                )
+            )
+            continue
         mapped: dict[str, Any] = {}
         errors: list[str] = []
         crm_row_id = None
@@ -536,9 +581,6 @@ def parse_sheet_values(
                 mapped[field_name] = coerce_value(field_name, raw_value)
             except ValueError as error:
                 errors.append(f"{field_name}: {error}")
-        if not any(value is not None for value in mapped.values()):
-            errors.append("No importable values found in configured columns")
-
         nested = _nested_payload(mapped)
         validated_payload: dict[str, Any] | None = None
         title = None
@@ -596,6 +638,7 @@ def parse_sheet_values(
                 checksum=checksum,
                 title=title,
                 crm_row_id=crm_row_id,
+                submission_requested=True,
                 source_payload=source_payload,
                 errors=errors,
             )
@@ -613,7 +656,18 @@ def parse_sheet_values(
                 else None
             ),
             "columns": config.columns,
-            "values": values,
+            "values": [
+                headers,
+                *[
+                    row
+                    for row in values[1:]
+                    if submission_requested(
+                        row[submission_index]
+                        if submission_index < len(row)
+                        else None
+                    )
+                ],
+            ],
         }
     )
     return SheetSnapshot(
@@ -679,6 +733,15 @@ async def plan_rows(
             if parsed.crm_row_id is not None
             else None
         ) or existing_by_row.get(parsed.row_number)
+        if not parsed.submission_requested:
+            planned.append(
+                PlannedRow(
+                    parsed=parsed,
+                    action=GoogleSheetsRowAction.SKIPPED,
+                    existing=existing,
+                )
+            )
+            continue
         if parsed.row_number in duplicate_rows:
             parsed.errors.append("Duplicate source identity already exists in CRM")
         if parsed.errors:
@@ -864,6 +927,8 @@ async def apply_planned_rows(
             if content_values:
                 scenario.content = ScenarioContent(**content_values)
             _apply_workflow_values(scenario, payload)
+            if scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
+                submit_for_responsible_review(scenario)
             session.add(scenario)
             item.existing = scenario
         else:
@@ -886,6 +951,8 @@ async def apply_planned_rows(
                     scenario.content = ScenarioContent()
                 _set_nested_values(scenario.content, content_values)
             _apply_workflow_values(scenario, payload)
+            if scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
+                submit_for_responsible_review(scenario)
     await session.flush()
     return [item.result() for item in planned]
 

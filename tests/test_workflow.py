@@ -20,6 +20,7 @@ from crm.workflow import (
     stage_prerequisites_met,
     status_after_decision,
     status_after_unpublishing,
+    submit_for_responsible_review,
 )
 
 
@@ -49,6 +50,24 @@ def scenario(
 
 def approval(stage: ApprovalStage, decision: ApprovalDecision = ApprovalDecision.APPROVED):
     return SimpleNamespace(stage=stage, decision=decision)
+
+
+def test_explicit_sheet_submission_moves_only_that_revision_to_manager_review():
+    value = scenario(
+        approvals=[
+            approval(ApprovalStage.RESPONSIBLE_REVIEW, ApprovalDecision.REVISION),
+            approval(ApprovalStage.PRE_GENERATION_CLIENT, ApprovalDecision.APPROVED),
+        ],
+    )
+    value.status = ScenarioStatus.REVISION
+
+    submit_for_responsible_review(value)
+
+    assert value.status == ScenarioStatus.IN_REVIEW
+    assert all(
+        item.decision == ApprovalDecision.PENDING
+        for item in value.approvals
+    )
 
 
 def test_workflow_decisions_are_role_safe() -> None:

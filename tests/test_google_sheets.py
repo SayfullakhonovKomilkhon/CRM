@@ -14,6 +14,7 @@ from crm.google_sheets import (
     parse_date,
     parse_sheet_values,
     resolve_columns,
+    submission_requested,
     workflow_is_locked,
 )
 from crm.models import ApprovalDecision, ApprovalStage, Scenario, ScenarioContent, ScenarioStatus
@@ -99,6 +100,7 @@ def test_parse_sheet_values_imports_workflow_montage_publication_and_identity():
                 "Готовый материал",
                 "Дата публикации",
                 "Опубликовано",
+                "Отправка на согласование",
                 "",
             ],
             [
@@ -113,13 +115,14 @@ def test_parse_sheet_values_imports_workflow_montage_publication_and_identity():
                 "https://example.com/video",
                 "25.07",
                 "TRUE",
+                "Отправить",
                 str(row_id),
             ],
         ],
         tab_config(),
         "sheet-id",
         100,
-        crm_row_id_column="L",
+        crm_row_id_column="M",
     )
 
     row = snapshot.rows[0]
@@ -130,7 +133,7 @@ def test_parse_sheet_values_imports_workflow_montage_publication_and_identity():
     assert row.payload["approval"]["montage_compliance"]["decision"] == "rejected"
     assert row.payload["montage"]["price"] == 400.50
     assert row.payload["publication"]["is_published"] is True
-    assert row.source_payload["L"]["value"] == str(row_id)
+    assert row.source_payload["M"]["value"] == str(row_id)
 
 
 def test_workflow_import_derives_published_status_and_keeps_all_decisions():
@@ -169,9 +172,15 @@ def test_resolve_columns_rejects_one_column_mapped_to_two_fields():
 def test_parse_sheet_values_returns_stable_row_identity_and_validated_payload():
     config = tab_config()
     values = [
-        ["Дата", "Сценарий", "Текст на обложке", "Общий балл"],
-        ["24.07.2026", "Тестовый сценарий", "Обложка", "87"],
-        ["", "", "", ""],
+        [
+            "Дата",
+            "Сценарий",
+            "Текст на обложке",
+            "Общий балл",
+            "Отправка на согласование",
+        ],
+        ["24.07.2026", "Тестовый сценарий", "Обложка", "87", "Отправить"],
+        ["", "", "", "", ""],
     ]
     first = parse_sheet_values(values, config, "sheet-id", 100)
     second = parse_sheet_values(values, config, "sheet-id", 100)
@@ -189,7 +198,10 @@ def test_parse_sheet_values_returns_stable_row_identity_and_validated_payload():
 
 def test_parse_sheet_values_reports_cell_validation_with_row_number():
     snapshot = parse_sheet_values(
-        [["Дата", "Общий балл"], ["not-a-date", "101"]],
+        [
+            ["Дата", "Общий балл", "Отправка на согласование"],
+            ["not-a-date", "101", "Отправить"],
+        ],
         tab_config(),
         "sheet-id",
         100,
@@ -203,10 +215,89 @@ def test_parse_sheet_values_reports_cell_validation_with_row_number():
 def test_parse_sheet_values_rejects_nonempty_rows_over_limit():
     with pytest.raises(GoogleSheetsSourceError, match="MAX_ROWS"):
         parse_sheet_values(
-            [["Сценарий"], ["one"], [""], ["three"]],
+            [
+                ["Сценарий", "Отправка на согласование"],
+                ["one", "Отправить"],
+                ["", ""],
+                ["three", "Отправить"],
+            ],
             tab_config(),
             "sheet-id",
             1,
+        )
+
+
+def test_unsubmitted_rows_over_limit_do_not_block_submitted_rows():
+    snapshot = parse_sheet_values(
+        [
+            ["Сценарий", "Отправка на согласование"],
+            ["one", "Отправить"],
+            ["draft", ""],
+        ],
+        tab_config(),
+        "sheet-id",
+        1,
+    )
+
+    assert len(snapshot.rows) == 1
+    assert snapshot.rows[0].submission_requested is True
+
+
+def test_draft_edits_do_not_invalidate_a_submitted_snapshot():
+    headers = ["Сценарий", "Отправка на согласование"]
+    config = tab_config()
+    first = parse_sheet_values(
+        [headers, ["approved row", "Отправить"], ["draft one", ""]],
+        config,
+        "sheet-id",
+        100,
+    )
+    second = parse_sheet_values(
+        [headers, ["approved row", "Отправить"], ["changed draft", ""]],
+        config,
+        "sheet-id",
+        100,
+    )
+
+    assert first.checksum == second.checksum
+
+
+def test_parse_sheet_values_skips_unsubmitted_drafts_without_validating_them():
+    snapshot = parse_sheet_values(
+        [
+            ["Дата", "Общий балл", "Отправка на согласование"],
+            ["не дата", "999", ""],
+            ["", "", "Отправить"],
+        ],
+        tab_config(),
+        "sheet-id",
+        100,
+    )
+
+    draft, submitted = snapshot.rows
+    assert draft.submission_requested is False
+    assert draft.payload is None
+    assert draft.errors == []
+    assert submitted.submission_requested is True
+    assert all(value is None for value in submitted.payload.values())
+    assert submitted.errors == []
+
+
+def test_submission_marker_is_exact_and_header_is_required():
+    assert submission_requested("Отправить")
+    assert submission_requested("  ОТПРАВИТЬ ")
+    assert not submission_requested("Готово")
+    assert not submission_requested("")
+
+    with pytest.raises(
+        GoogleSheetsConfigurationError,
+        match="Отправка на согласование",
+    ):
+        parse_sheet_values(
+            [["Сценарий"], ["Текст"]],
+            tab_config(),
+            "sheet-id",
+            100,
         )
 
 

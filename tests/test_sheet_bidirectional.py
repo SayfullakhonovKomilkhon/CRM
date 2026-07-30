@@ -10,7 +10,11 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from crm.config import Settings
-from crm.google_sheets import GoogleSheetsClient, GoogleSheetsSourceError
+from crm.google_sheets import (
+    GoogleSheetsClient,
+    GoogleSheetsSourceError,
+    canonical_checksum,
+)
 from crm.main import app
 from crm.models import (
     ApprovalDecision,
@@ -18,11 +22,12 @@ from crm.models import (
     Role,
     Scenario,
     ScenarioStatus,
+    SheetEventStatus,
     SheetSource,
     SheetWritebackStatus,
 )
 from crm.routers import scenarios as scenario_routes
-from crm.schemas import ScenarioCreate
+from crm.schemas import ScenarioCreate, SheetWebhookEvent
 from crm.sheet_sync import (
     REALTIME_SERVER_CONTROLLED_FIELDS,
     WRITEBACK_FIELDS,
@@ -37,6 +42,7 @@ from crm.sheet_sync import (
     process_writeback_event,
     source_metadata_matches,
     source_webhook_secret,
+    submission_requested,
     validate_column_map,
     verify_webhook,
     webhook_signature,
@@ -142,7 +148,6 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     ).read_text()
 
     assert "fullRowFields_" in script
-    assert "hasMeaningfulFields_" in script
     assert "includeEmptySourceFields: hasExistingIdentity" in script
     assert "isWorkflowField_" in script
     assert "rowIdAppearsEarlier_" in script
@@ -150,6 +155,116 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert 'new Set(["montage.material_status"])' in script
     assert 'newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5)' in script
     assert 'response.status === "failed"' in script
+    assert 'const CRM_SUBMISSION_HEADER = "Отправка на согласование"' in script
+    assert "isSubmissionRequested_" in script
+    assert "submissionCell.clearContent()" in script
+    assert "if (!hasExistingIdentity && !hasMeaningfulFields_(fields))" not in script
+
+
+def test_realtime_inbound_requires_explicit_submission_marker():
+    assert submission_requested("Отправить") is True
+    assert submission_requested("Черновик") is False
+    source = inspect.getsource(process_inbound_event)
+    assert 'event.raw.get("submission_status")' in source
+    assert "Sheet row is not marked 'Отправить'" in source
+
+
+def test_explicit_submission_accepts_a_row_with_no_other_values():
+    event = SheetWebhookEvent(
+        event_id="marker-only",
+        schema_version=1,
+        row_id=uuid.uuid4(),
+        row_number=5,
+        changed_fields={},
+        raw={
+            "spreadsheet_id": "sheet-1",
+            "tab": "сценарий",
+            "submission_status": "Отправить",
+        },
+        checksum=canonical_checksum({}),
+        origin="sheets",
+    )
+
+    assert event.changed_fields == {}
+
+
+async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped():
+    source_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    scenarist_id = uuid.uuid4()
+    source = SimpleNamespace(
+        id=source_id,
+        enabled=True,
+        spreadsheet_id="sheet-1",
+        source_tab="сценарий",
+        project_id=project_id,
+        assigned_scenarist_id=scenarist_id,
+        inbound_column_map={},
+        last_status=None,
+        last_error=None,
+        last_event_at=None,
+    )
+
+    class InboundSession:
+        def __init__(self, event):
+            self.event = event
+            self.scalar_calls = 0
+            self.added = []
+
+        async def scalar(self, _query):
+            self.scalar_calls += 1
+            return self.event if self.scalar_calls == 1 else None
+
+        async def get(self, model, _identifier):
+            assert model is SheetSource
+            return source
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+        def add(self, value):
+            self.added.append(value)
+
+        async def flush(self):
+            return None
+
+    def inbound_event(submission_status):
+        return SimpleNamespace(
+            id=uuid.uuid4(),
+            status=SheetEventStatus.RECEIVED,
+            attempts=0,
+            source_id=source_id,
+            crm_row_id=uuid.uuid4(),
+            row_number=5,
+            changed_fields={},
+            raw={
+                "spreadsheet_id": "sheet-1",
+                "tab": "сценарий",
+                "submission_status": submission_status,
+            },
+            checksum=canonical_checksum({}),
+            origin="sheets",
+            error=None,
+            processed_at=None,
+        )
+
+    submitted_session = InboundSession(inbound_event("Отправить"))
+    submitted = await process_inbound_event(
+        submitted_session,
+        submitted_session.event.id,
+    )
+    created = next(
+        item for item in submitted_session.added if isinstance(item, Scenario)
+    )
+    assert submitted.status == SheetEventStatus.COMPLETED
+    assert created.status == ScenarioStatus.IN_REVIEW
+    assert created.project_id == project_id
+    assert created.assigned_scenarist_id == scenarist_id
+
+    draft_session = InboundSession(inbound_event(""))
+    skipped = await process_inbound_event(draft_session, draft_session.event.id)
+    assert skipped.status == SheetEventStatus.SKIPPED
+    assert draft_session.added == []
 
 
 def test_inbound_workflow_statuses_are_coerced_and_applied():

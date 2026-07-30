@@ -14,6 +14,8 @@ const CRM_SCHEMA_VERSION = 1;
 const CRM_RECONCILE_HANDLER = "reconcileCrmRows";
 const CRM_RECONCILE_DEFAULT_BATCH_SIZE = 100;
 const CRM_REALTIME_EXCLUDED_FIELDS = new Set(["montage.material_status"]);
+const CRM_SUBMISSION_HEADER = "Отправка на согласование";
+const CRM_SUBMISSION_READY_VALUE = "Отправить";
 
 function installCrmSync() {
   const spreadsheet = SpreadsheetApp.getActive();
@@ -38,13 +40,14 @@ function onCrmEdit(event) {
   // is an additional guard for explicit CRM-origin script operations.
   const map = JSON.parse(props.getProperty("CRM_INBOUND_COLUMN_MAP") || "{}");
   const rowIdColumn = columnNumber_(props.getProperty("CRM_ROW_ID_COLUMN") || "A");
+  const submissionColumn = submissionColumn_(sheet, headerRow, props);
   const firstRow = Math.max(event.range.getRow(), headerRow + 1);
   const lastRow = event.range.getLastRow();
   const editedColumns = new Set(Array.from(
     {length: event.range.getNumColumns()},
     (_, offset) => String(event.range.getColumn() + offset)
   ));
-  const touchesMappedColumn = Object.keys(map).some(
+  const touchesMappedColumn = editedColumns.has(String(submissionColumn)) || Object.keys(map).some(
     (column) => editedColumns.has(column) && !CRM_REALTIME_EXCLUDED_FIELDS.has(map[column])
   );
   if (!touchesMappedColumn) return;
@@ -55,7 +58,8 @@ function onCrmEdit(event) {
     if (CacheService.getScriptCache().get(suppressionKey)) continue;
     syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, {
       force: true,
-      a1: event.range.getA1Notation()
+      a1: event.range.getA1Notation(),
+      submissionColumn
     });
   }
 }
@@ -78,6 +82,7 @@ function reconcileCrmRows() {
     if (lastRow <= headerRow) return;
     const map = JSON.parse(props.getProperty("CRM_INBOUND_COLUMN_MAP") || "{}");
     const rowIdColumn = columnNumber_(props.getProperty("CRM_ROW_ID_COLUMN") || "A");
+    const submissionColumn = submissionColumn_(sheet, headerRow, props);
     const configuredBatch = Number(
       props.getProperty("CRM_RECONCILE_BATCH_SIZE") || CRM_RECONCILE_DEFAULT_BATCH_SIZE
     );
@@ -96,7 +101,12 @@ function reconcileCrmRows() {
           rowIdColumn,
           props,
           spreadsheet.getId(),
-          {force: false, a1: `${rowNumber}:${rowNumber}`, claimedRowIds}
+          {
+            force: false,
+            a1: `${rowNumber}:${rowNumber}`,
+            claimedRowIds,
+            submissionColumn
+          }
         );
       } catch (error) {
         // One malformed or workflow-locked row must not block rows below it.
@@ -113,13 +123,15 @@ function reconcileCrmRows() {
 }
 
 function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, options) {
+  const submissionCell = sheet.getRange(rowNumber, options.submissionColumn);
+  const submissionStatus = submissionCell.getDisplayValue().trim();
+  if (!isSubmissionRequested_(submissionStatus)) return false;
   const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
   const rawRowId = rowIdCell.getDisplayValue().trim();
   const hasExistingIdentity = isUuid_(rawRowId);
   const fields = fullRowFields_(sheet, rowNumber, map, {
     includeEmptySourceFields: hasExistingIdentity
   });
-  if (!hasExistingIdentity && !hasMeaningfulFields_(fields)) return false;
 
   let rowId = rawRowId;
   const claimed = options.claimedRowIds || null;
@@ -147,7 +159,8 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     raw: {
       spreadsheet_id: spreadsheetId,
       tab: sheet.getName(),
-      a1: options.a1
+      a1: options.a1,
+      submission_status: submissionStatus
     },
     checksum,
     origin: "sheets",
@@ -168,7 +181,39 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     throw new Error(response.error || "CRM rejected the row");
   }
   props.setProperty(checksumKey, checksum);
+  // Consuming the marker makes submission explicit and prevents the next draft
+  // edit from being sent before the scenarist chooses "Отправить" again.
+  submissionCell.clearContent();
   return true;
+}
+
+function submissionColumn_(sheet, headerRow, props) {
+  const configured = String(
+    props.getProperty("CRM_SUBMISSION_COLUMN") || ""
+  ).trim();
+  if (configured) return columnNumber_(configured);
+  const headers = sheet.getRange(1, 1, headerRow, sheet.getLastColumn())
+    .getDisplayValues()[headerRow - 1];
+  const expected = normalizeText_(CRM_SUBMISSION_HEADER);
+  const matches = [];
+  headers.forEach((header, index) => {
+    if (normalizeText_(header) === expected) matches.push(index + 1);
+  });
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected exactly one "${CRM_SUBMISSION_HEADER}" column in row ${headerRow}`
+    );
+  }
+  return matches[0];
+}
+
+function isSubmissionRequested_(value) {
+  return normalizeText_(value) === normalizeText_(CRM_SUBMISSION_READY_VALUE);
+}
+
+function normalizeText_(value) {
+  return String(value || "").trim().toLocaleLowerCase("ru-RU")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
 }
 
 function rowIdAppearsEarlier_(sheet, rowNumber, rowIdColumn, rowId, props) {
@@ -214,17 +259,6 @@ function isWorkflowField_(field) {
     field.startsWith("montage.") ||
     field.startsWith("publication.") ||
     field.startsWith("final_revision_gate.");
-}
-
-function hasMeaningfulFields_(fields) {
-  return Object.values(fields).some((value) => {
-    if (value === null || value === undefined) return false;
-    const normalized = String(value).trim().toLowerCase();
-    return normalized !== "" &&
-      normalized !== "false" &&
-      normalized !== "—" &&
-      normalized !== "-";
-  });
 }
 
 function syncChecksumKey_(sheetId, rowId) {

@@ -106,6 +106,7 @@ from crm.workflow import (
     stage_prerequisites_met,
     status_after_decision,
     status_after_unpublishing,
+    submit_for_responsible_review,
 )
 
 router = APIRouter(prefix="/scenarios", tags=["scenarios"])
@@ -1900,13 +1901,7 @@ async def submit_scenario_for_review(
             detail="Script text is required before submission",
         )
 
-    reset_downstream_approvals(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
-    approval = approval_for(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
-    if approval is not None:
-        approval.decision = ApprovalDecision.PENDING
-        approval.decided_by_id = None
-        approval.decided_at = None
-    scenario.status = ScenarioStatus.IN_REVIEW
+    submit_for_responsible_review(scenario)
     scenario.updated_at = datetime.now(UTC)
     await enqueue_sheet_writeback(
         session,

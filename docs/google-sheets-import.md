@@ -96,6 +96,11 @@ serializes concurrent syncs for the same spreadsheet/tab. A changed source or CR
 
 ## Idempotency and overwrite policy
 
+- A row is eligible only when `Отправка на согласование` contains
+  `Отправить` (case and surrounding whitespace are ignored).
+- Rows without that marker are skipped before validation and never receive a
+  CRM identity. The rule applies to both full reconciliation and realtime
+  signed webhooks.
 - Identity is `(source_sheet_id, source_tab, source_row)` with a database unique constraint.
 - A canonical SHA-256 checksum makes unchanged reimports `skipped`.
 - New scenarios receive the normal server-generated sequential `external_id`.

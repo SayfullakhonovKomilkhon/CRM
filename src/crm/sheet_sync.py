@@ -24,6 +24,7 @@ from crm.google_sheets import (
     _nested_payload,
     canonical_checksum,
     coerce_value,
+    submission_requested,
     workflow_is_locked,
 )
 from crm.models import (
@@ -41,7 +42,7 @@ from crm.models import (
 )
 from crm.schemas import ScenarioCreate
 from crm.sheet import SHEET_FIELDS
-from crm.workflow import approval_for
+from crm.workflow import approval_for, submit_for_responsible_review
 
 WEBHOOK_SCHEMA_VERSION = 1
 SHEETS_ORIGIN = "sheets"
@@ -359,6 +360,11 @@ async def process_inbound_event(
         event.error = "CRM-origin event suppressed"
         event.processed_at = datetime.now(UTC)
         return event
+    if not submission_requested(event.raw.get("submission_status")):
+        event.status = SheetEventStatus.SKIPPED
+        event.error = "Sheet row is not marked 'Отправить' for approval"
+        event.processed_at = datetime.now(UTC)
+        return event
     allowed = (
         set(source.inbound_column_map)
         & set(SAFE_IMPORT_FIELDS)
@@ -423,6 +429,8 @@ async def process_inbound_event(
         source_payload["mapped_fields"] = mapped_fields
         source_payload["last_event_raw"] = event.raw
         scenario.source_payload = source_payload
+        if scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
+            submit_for_responsible_review(scenario)
     except (ValueError, ValidationError) as error:
         if scenario_was_new:
             session.expunge(scenario)
