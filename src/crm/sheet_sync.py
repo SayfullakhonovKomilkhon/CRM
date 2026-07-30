@@ -360,20 +360,25 @@ async def process_inbound_event(
         event.error = "CRM-origin event suppressed"
         event.processed_at = datetime.now(UTC)
         return event
-    if not submission_requested(event.raw.get("submission_status")):
-        event.status = SheetEventStatus.SKIPPED
-        event.error = "Sheet row is not marked 'Отправить' for approval"
-        event.processed_at = datetime.now(UTC)
-        return event
+    submit_requested = submission_requested(event.raw.get("submission_status"))
     allowed = (
         set(source.inbound_column_map)
         & set(SAFE_IMPORT_FIELDS)
         - set(REALTIME_SERVER_CONTROLLED_FIELDS)
     )
-    unsupported = sorted(set(event.changed_fields) - allowed)
-    if unsupported:
-        event.status = SheetEventStatus.FAILED
-        event.error = "Inbound fields are not allowed: " + ", ".join(unsupported)
+    inbound_fields = {
+        field_name: value
+        for field_name, value in event.changed_fields.items()
+        if field_name in allowed
+    }
+    ignored_fields = sorted(set(event.changed_fields) - allowed)
+    if ignored_fields and not inbound_fields and not submit_requested:
+        event.status = SheetEventStatus.SKIPPED
+        event.error = (
+            "Sheet edit contains only CRM-owned fields: "
+            + ", ".join(ignored_fields)
+        )
+        event.processed_at = datetime.now(UTC)
         return event
     scenario = await session.scalar(
         select(Scenario)
@@ -391,6 +396,11 @@ async def process_inbound_event(
         )
         .with_for_update()
     )
+    if scenario is None and not submit_requested:
+        event.status = SheetEventStatus.SKIPPED
+        event.error = "New Sheet row is not marked 'Отправить' for approval"
+        event.processed_at = datetime.now(UTC)
+        return event
     if scenario is not None and scenario.source_checksum == event.checksum:
         event.status = SheetEventStatus.SKIPPED
         event.error = "Checksum already applied"
@@ -399,7 +409,7 @@ async def process_inbound_event(
     if (
         scenario is not None
         and not inbound_update_allowed(scenario)
-        and not workflow_fields_only(event.changed_fields)
+        and not workflow_fields_only(inbound_fields)
     ):
         event.status = SheetEventStatus.FAILED
         event.error = "CRM workflow has started; inbound source updates are locked"
@@ -422,14 +432,19 @@ async def process_inbound_event(
         scenario.source_row = event.row_number
         scenario.source_checksum = event.checksum
     try:
-        _set_values(scenario, event.changed_fields)
+        _set_values(scenario, inbound_fields)
         source_payload = dict(scenario.source_payload or {})
         mapped_fields = dict(source_payload.get("mapped_fields") or {})
-        mapped_fields.update(event.changed_fields)
+        mapped_fields.update(inbound_fields)
         source_payload["mapped_fields"] = mapped_fields
         source_payload["last_event_raw"] = event.raw
+        if ignored_fields:
+            source_payload["last_ignored_sheet_fields"] = ignored_fields
         scenario.source_payload = source_payload
-        if scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
+        if (
+            submit_requested
+            and scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}
+        ):
             submit_for_responsible_review(scenario)
     except (ValueError, ValidationError) as error:
         if scenario_was_new:

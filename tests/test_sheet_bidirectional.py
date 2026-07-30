@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from crm.config import Settings
 from crm.google_sheets import (
+    SAFE_IMPORT_FIELDS,
     GoogleSheetsClient,
     GoogleSheetsSourceError,
     canonical_checksum,
@@ -46,7 +47,6 @@ from crm.sheet_sync import (
     validate_column_map,
     verify_webhook,
     webhook_signature,
-    workflow_fields_only,
 )
 
 
@@ -149,10 +149,14 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
 
     assert "fullRowFields_" in script
     assert "includeEmptySourceFields: hasExistingIdentity" in script
-    assert "isWorkflowField_" in script
     assert "rowIdAppearsEarlier_" in script
     assert "One malformed or workflow-locked row must not block rows below it." in script
-    assert 'new Set(["montage.material_status"])' in script
+    assert "const CRM_SCENARIST_INBOUND_FIELDS = new Set([" in script
+    assert '"content.script_text"' in script
+    assert '"montage.source_material_url"' in script
+    assert '"approval.responsible_review.decision"' not in script
+    assert "!CRM_SCENARIST_INBOUND_FIELDS.has(field)" in script
+    assert 'value === "" && !options.includeEmptySourceFields' in script
     assert 'newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5)' in script
     assert 'response.status === "failed"' in script
     assert 'const CRM_SUBMISSION_HEADER = "Отправка на согласование"' in script
@@ -161,12 +165,13 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert "if (!hasExistingIdentity && !hasMeaningfulFields_(fields))" not in script
 
 
-def test_realtime_inbound_requires_explicit_submission_marker():
+def test_realtime_inbound_requires_marker_only_for_a_new_row():
     assert submission_requested("Отправить") is True
     assert submission_requested("Черновик") is False
     source = inspect.getsource(process_inbound_event)
     assert 'event.raw.get("submission_status")' in source
-    assert "Sheet row is not marked 'Отправить'" in source
+    assert "New Sheet row is not marked 'Отправить'" in source
+    assert "scenario is None and not submit_requested" in source
 
 
 def test_explicit_submission_accepts_a_row_with_no_other_values():
@@ -199,21 +204,22 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
         source_tab="сценарий",
         project_id=project_id,
         assigned_scenarist_id=scenarist_id,
-        inbound_column_map={},
+        inbound_column_map={"speaker": "B"},
         last_status=None,
         last_error=None,
         last_event_at=None,
     )
 
     class InboundSession:
-        def __init__(self, event):
+        def __init__(self, event, existing=None):
             self.event = event
+            self.existing = existing
             self.scalar_calls = 0
             self.added = []
 
         async def scalar(self, _query):
             self.scalar_calls += 1
-            return self.event if self.scalar_calls == 1 else None
+            return self.event if self.scalar_calls == 1 else self.existing
 
         async def get(self, model, _identifier):
             assert model is SheetSource
@@ -228,21 +234,22 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
         async def flush(self):
             return None
 
-    def inbound_event(submission_status):
+    def inbound_event(submission_status, changed_fields=None, row_id=None):
+        changed_fields = changed_fields or {}
         return SimpleNamespace(
             id=uuid.uuid4(),
             status=SheetEventStatus.RECEIVED,
             attempts=0,
             source_id=source_id,
-            crm_row_id=uuid.uuid4(),
+            crm_row_id=row_id or uuid.uuid4(),
             row_number=5,
-            changed_fields={},
+            changed_fields=changed_fields,
             raw={
                 "spreadsheet_id": "sheet-1",
                 "tab": "сценарий",
                 "submission_status": submission_status,
             },
-            checksum=canonical_checksum({}),
+            checksum=canonical_checksum(changed_fields),
             origin="sheets",
             error=None,
             processed_at=None,
@@ -266,37 +273,85 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert skipped.status == SheetEventStatus.SKIPPED
     assert draft_session.added == []
 
-
-def test_inbound_workflow_statuses_are_coerced_and_applied():
-    value = Scenario(
-        project_id=uuid.uuid4(),
-        assigned_scenarist_id=uuid.uuid4(),
-        external_id="workflow-test",
+    existing_row_id = uuid.uuid4()
+    existing = Scenario(
+        project_id=project_id,
+        assigned_scenarist_id=scenarist_id,
+        sheet_source_id=source_id,
+        crm_row_id=existing_row_id,
+        source_checksum="old",
+        status=ScenarioStatus.DRAFT,
     )
-    value.content = __import__(
-        "crm.models", fromlist=["ScenarioContent"]
-    ).ScenarioContent(script_text="Сценарий")
+    edit_session = InboundSession(
+        inbound_event(
+            "",
+            {"speaker": "Обновлено в Google"},
+            existing_row_id,
+        ),
+        existing,
+    )
+    updated = await process_inbound_event(edit_session, edit_session.event.id)
+    assert updated.status == SheetEventStatus.COMPLETED
+    assert existing.speaker == "Обновлено в Google"
+    assert existing.status == ScenarioStatus.DRAFT
 
-    _set_values(
-        value,
+    source.inbound_column_map = {
+        "speaker": "B",
+        "approval.responsible_review.decision": "C",
+    }
+    legacy_row_id = uuid.uuid4()
+    legacy_existing = Scenario(
+        project_id=project_id,
+        assigned_scenarist_id=scenarist_id,
+        sheet_source_id=source_id,
+        crm_row_id=legacy_row_id,
+        source_checksum="older",
+        status=ScenarioStatus.DRAFT,
+    )
+    legacy_session = InboundSession(
+        inbound_event(
+            "",
+            {
+                "speaker": "Разрешённое изменение",
+                "approval.responsible_review.decision": "approved",
+            },
+            legacy_row_id,
+        ),
+        legacy_existing,
+    )
+    legacy_result = await process_inbound_event(
+        legacy_session,
+        legacy_session.event.id,
+    )
+    assert legacy_result.status == SheetEventStatus.COMPLETED
+    assert legacy_existing.speaker == "Разрешённое изменение"
+    assert legacy_existing.approvals == []
+    assert legacy_existing.source_payload["last_ignored_sheet_fields"] == [
+        "approval.responsible_review.decision"
+    ]
+
+
+def test_inbound_allowlist_accepts_scenarist_fields_and_rejects_role_workflow():
+    validate_column_map(
         {
-            "approval.responsible_review.decision": "Одобрено",
-            "approval.pre_generation_client.decision": "Доработать",
-            "approval.pre_generation_client.comment": "Исправьте вступление",
+            "content.script_text": "B",
+            "montage.source_material_url": "C",
+            "publication.publisher_brief": "D",
         },
+        allowed_fields=SAFE_IMPORT_FIELDS,
     )
-
-    assert value.status == ScenarioStatus.REVISION
-    client = next(
-        item
-        for item in value.approvals
-        if item.stage == ApprovalStage.PRE_GENERATION_CLIENT
-    )
-    assert client.decision == ApprovalDecision.REVISION
-    assert client.comment == "Исправьте вступление"
-    assert workflow_fields_only(
-        {"publication.is_published": "TRUE"}
-    )
+    for role_owned_field in (
+        "approval.responsible_review.decision",
+        "montage.ready_material_url",
+        "montage.price",
+        "publication.is_published",
+        "publication.publisher_status",
+    ):
+        with pytest.raises(HTTPException, match="Unsupported mapped fields"):
+            validate_column_map(
+                {role_owned_field: "B"},
+                allowed_fields=SAFE_IMPORT_FIELDS,
+            )
 
 
 def test_inbound_update_eager_loads_mutable_scenario_relationships():

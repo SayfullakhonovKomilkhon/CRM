@@ -13,7 +13,49 @@
 const CRM_SCHEMA_VERSION = 1;
 const CRM_RECONCILE_HANDLER = "reconcileCrmRows";
 const CRM_RECONCILE_DEFAULT_BATCH_SIZE = 100;
-const CRM_REALTIME_EXCLUDED_FIELDS = new Set(["montage.material_status"]);
+const CRM_SCENARIST_INBOUND_FIELDS = new Set([
+  "scenario_date",
+  "speaker",
+  "deadline",
+  "scenario_type",
+  "visual_format",
+  "score",
+  "research.competitor_url",
+  "research.competitor_category",
+  "research.full_analysis",
+  "research.performance_metrics",
+  "research.transcription",
+  "research.timeline",
+  "research.why_viral",
+  "research.takeaways",
+  "research.improvements",
+  "research.replication_template",
+  "research.ai_analysis",
+  "content.claude_context",
+  "content.cover_text",
+  "content.script_text",
+  "content.montage_brief",
+  "content.scenarist_comment",
+  "content.hook",
+  "content.retention",
+  "content.call_to_action",
+  "content.visual_notes",
+  "content.score_recommendations",
+  "content.ai_review",
+  "montage.source_material_url",
+  "montage.client_brand_style",
+  "montage.extra_brief",
+  "montage.scenarist_material_comment",
+  "montage.scenarist_revision_status",
+  "montage.scenarist_revision_comment",
+  "publication.publisher_brief",
+  "publication.description_dzen",
+  "publication.description_youtube",
+  "publication.description_tiktok",
+  "publication.description_instagram",
+  "publication.ai_social_descriptions",
+  "publication.leia_script"
+]);
 const CRM_SUBMISSION_HEADER = "Отправка на согласование";
 const CRM_SUBMISSION_READY_VALUE = "Отправить";
 
@@ -48,7 +90,7 @@ function onCrmEdit(event) {
     (_, offset) => String(event.range.getColumn() + offset)
   ));
   const touchesMappedColumn = editedColumns.has(String(submissionColumn)) || Object.keys(map).some(
-    (column) => editedColumns.has(column) && !CRM_REALTIME_EXCLUDED_FIELDS.has(map[column])
+    (column) => editedColumns.has(column) && CRM_SCENARIST_INBOUND_FIELDS.has(map[column])
   );
   if (!touchesMappedColumn) return;
 
@@ -125,10 +167,10 @@ function reconcileCrmRows() {
 function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, options) {
   const submissionCell = sheet.getRange(rowNumber, options.submissionColumn);
   const submissionStatus = submissionCell.getDisplayValue().trim();
-  if (!isSubmissionRequested_(submissionStatus)) return false;
   const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
   const rawRowId = rowIdCell.getDisplayValue().trim();
   const hasExistingIdentity = isUuid_(rawRowId);
+  if (!hasExistingIdentity && !isSubmissionRequested_(submissionStatus)) return false;
   const fields = fullRowFields_(sheet, rowNumber, map, {
     includeEmptySourceFields: hasExistingIdentity
   });
@@ -181,9 +223,9 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     throw new Error(response.error || "CRM rejected the row");
   }
   props.setProperty(checksumKey, checksum);
-  // Consuming the marker makes submission explicit and prevents the next draft
-  // edit from being sent before the scenarist chooses "Отправить" again.
-  submissionCell.clearContent();
+  // Consuming the marker keeps creation/submission explicit. A linked row can
+  // continue synchronizing scenarist-owned edits through its protected UUID.
+  if (isSubmissionRequested_(submissionStatus)) submissionCell.clearContent();
   return true;
 }
 
@@ -244,21 +286,12 @@ function fullRowFields_(sheet, rowNumber, map, options) {
   const fields = {};
   columns.forEach((column) => {
     const field = map[String(column)];
-    if (!field || CRM_REALTIME_EXCLUDED_FIELDS.has(field)) return;
+    if (!field || !CRM_SCENARIST_INBOUND_FIELDS.has(field)) return;
     const value = values[column - firstColumn];
-    if (value === "" && (
-      !options.includeEmptySourceFields || isWorkflowField_(field)
-    )) return;
+    if (value === "" && !options.includeEmptySourceFields) return;
     fields[field] = value === "" ? null : value;
   });
   return fields;
-}
-
-function isWorkflowField_(field) {
-  return field.startsWith("approval.") ||
-    field.startsWith("montage.") ||
-    field.startsWith("publication.") ||
-    field.startsWith("final_revision_gate.");
 }
 
 function syncChecksumKey_(sheetId, rowId) {

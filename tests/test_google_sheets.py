@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from crm.config import GoogleSheetsTabConfig, Settings
 from crm.google_sheets import (
+    SAFE_IMPORT_FIELDS,
     GoogleSheetsConfigurationError,
     GoogleSheetsSourceError,
     _apply_workflow_values,
@@ -84,7 +85,7 @@ def test_resolve_columns_supports_explicit_header_and_rejects_unsafe_fields():
         resolve_columns(["Published"], unsafe)
 
 
-def test_parse_sheet_values_imports_workflow_montage_publication_and_identity():
+def test_parse_sheet_values_imports_only_scenarist_owned_fields_and_identity():
     row_id = uuid.uuid4()
     snapshot = parse_sheet_values(
         [
@@ -95,8 +96,8 @@ def test_parse_sheet_values_imports_workflow_montage_publication_and_identity():
                 "Одобрение исходника",
                 "Проверка монтажа по ТЗ",
                 "Одобрение готового клиентом",
-                "Монтажёр",
-                "Цена монтажа",
+                "Исходник и обложка",
+                "ТЗ для публициста",
                 "Готовый материал",
                 "Дата публикации",
                 "Опубликовано",
@@ -110,8 +111,8 @@ def test_parse_sheet_values_imports_workflow_montage_publication_and_identity():
                 "Доработать",
                 "Отказ",
                 "Ожидает",
-                "Алексей",
-                "400,50",
+                "https://example.com/source",
+                "Текст для публициста",
                 "https://example.com/video",
                 "25.07",
                 "TRUE",
@@ -128,12 +129,47 @@ def test_parse_sheet_values_imports_workflow_montage_publication_and_identity():
     row = snapshot.rows[0]
     assert row.errors == []
     assert row.crm_row_id == row_id
-    assert row.payload["approval"]["responsible_review"]["decision"] == "approved"
-    assert row.payload["approval"]["source_material"]["decision"] == "revision"
-    assert row.payload["approval"]["montage_compliance"]["decision"] == "rejected"
-    assert row.payload["montage"]["price"] == 400.50
-    assert row.payload["publication"]["is_published"] is True
+    assert row.payload["content"]["script_text"] == "Полный сценарий"
+    assert (
+        row.payload["montage"]["source_material_url"]
+        == "https://example.com/source"
+    )
+    assert row.payload["publication"]["publisher_brief"] == "Текст для публициста"
+    assert "approval" not in row.payload
+    assert "ready_material_url" not in row.payload["montage"]
+    assert "publication_date" not in row.payload["publication"]
+    assert "is_published" not in row.payload["publication"]
     assert row.source_payload["M"]["value"] == str(row_id)
+
+
+def test_sheet_inbound_allowlist_excludes_other_role_fields():
+    assert "content.script_text" in SAFE_IMPORT_FIELDS
+    assert "montage.source_material_url" in SAFE_IMPORT_FIELDS
+    assert "publication.publisher_brief" in SAFE_IMPORT_FIELDS
+    assert "approval.responsible_review.decision" not in SAFE_IMPORT_FIELDS
+    assert "montage.ready_material_url" not in SAFE_IMPORT_FIELDS
+    assert "montage.price" not in SAFE_IMPORT_FIELDS
+    assert "publication.is_published" not in SAFE_IMPORT_FIELDS
+    assert "publication.publisher_status" not in SAFE_IMPORT_FIELDS
+
+
+def test_existing_identified_row_is_parsed_without_a_new_submission_marker():
+    row_id = uuid.uuid4()
+    snapshot = parse_sheet_values(
+        [
+            ["Сценарий", "Отправка на согласование", ""],
+            ["Обновлено в Google", "", str(row_id)],
+        ],
+        tab_config(),
+        "sheet-id",
+        100,
+        crm_row_id_column="C",
+    )
+
+    row = snapshot.rows[0]
+    assert row.crm_row_id == row_id
+    assert row.submission_requested is False
+    assert row.payload["content"]["script_text"] == "Обновлено в Google"
 
 
 def test_workflow_import_derives_published_status_and_keeps_all_decisions():

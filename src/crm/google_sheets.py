@@ -36,75 +36,15 @@ from crm.schemas import (
     GoogleSheetsRowResult,
     ScenarioCreate,
 )
+from crm.sheet import SCENARIST_OWNED_FIELD_NAMES, SHEET_FIELDS
 from crm.workflow import submit_for_responsible_review
 
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
-SAFE_IMPORT_FIELDS = (
-    "scenario_date",
-    "deadline",
-    "score",
-    "scenario_type",
-    "visual_format",
-    "speaker",
-    "research.competitor_url",
-    "research.competitor_category",
-    "research.full_analysis",
-    "research.performance_metrics",
-    "research.transcription",
-    "research.timeline",
-    "research.why_viral",
-    "research.takeaways",
-    "research.improvements",
-    "research.replication_template",
-    "research.ai_analysis",
-    "content.claude_context",
-    "content.cover_text",
-    "content.script_text",
-    "content.montage_brief",
-    "content.scenarist_comment",
-    "content.hook",
-    "content.retention",
-    "content.call_to_action",
-    "content.visual_notes",
-    "content.score_recommendations",
-    "content.ai_review",
-    "approval.responsible_review.decision",
-    "approval.responsible_review.comment",
-    "approval.pre_generation_client.decision",
-    "approval.pre_generation_client.comment",
-    "approval.source_material.decision",
-    "approval.source_material.comment",
-    "approval.montage_compliance.decision",
-    "approval.montage_compliance.comment",
-    "approval.final_client.decision",
-    "approval.final_client.comment",
-    "montage.source_material_url",
-    "montage.client_brand_style",
-    "montage.extra_brief",
-    "montage.external_editor_name",
-    "montage.price",
-    "montage.material_status",
-    "montage.scenarist_material_comment",
-    "montage.ready_material_url",
-    "montage.ready_at",
-    "montage.bot_visual_analysis",
-    "montage.compliance_analysis",
-    "montage.ai_analysis",
-    "montage.scenarist_revision_status",
-    "montage.scenarist_revision_comment",
-    "publication.publication_date",
-    "publication.publisher_brief",
-    "publication.description_dzen",
-    "publication.description_youtube",
-    "publication.description_tiktok",
-    "publication.description_instagram",
-    "publication.is_published",
-    "publication.instagram_url",
-    "publication.engagement_metrics",
-    "publication.publication_analysis",
-    "publication.ai_social_descriptions",
-    "publication.leia_script",
+SAFE_IMPORT_FIELDS = tuple(
+    item.field
+    for item in SHEET_FIELDS
+    if item.field in SCENARIST_OWNED_FIELD_NAMES
 )
 
 FIELD_ALIASES: dict[str, tuple[str, ...]] = {
@@ -544,6 +484,11 @@ def parse_sheet_values(
         data_rows = data_rows[:max_rows]
 
     parsed_rows: list[ParsedSheetRow] = []
+    identity_index = (
+        _column_number(crm_row_id_column) - 1
+        if crm_row_id_column
+        else None
+    )
     for offset, row in enumerate(data_rows, start=1):
         row_number = config.header_row + offset
         if not any(str(value).strip() for value in row):
@@ -552,7 +497,18 @@ def parse_sheet_values(
         is_submitted = submission_requested(
             row[submission_index] if submission_index < len(row) else None
         )
-        if not is_submitted:
+        crm_row_id = None
+        identity_error = None
+        if identity_index is not None:
+            identity_value = row[identity_index] if identity_index < len(row) else None
+            if str(identity_value or "").strip():
+                try:
+                    crm_row_id = uuid.UUID(str(identity_value).strip())
+                except ValueError:
+                    identity_error = (
+                        "crm_row_id: expected UUID in protected identity column"
+                    )
+        if not is_submitted and crm_row_id is None:
             parsed_rows.append(
                 ParsedSheetRow(
                     row_number=row_number,
@@ -565,16 +521,7 @@ def parse_sheet_values(
             )
             continue
         mapped: dict[str, Any] = {}
-        errors: list[str] = []
-        crm_row_id = None
-        if crm_row_id_column:
-            identity_index = _column_number(crm_row_id_column) - 1
-            identity_value = row[identity_index] if identity_index < len(row) else None
-            if str(identity_value or "").strip():
-                try:
-                    crm_row_id = uuid.UUID(str(identity_value).strip())
-                except ValueError:
-                    errors.append("crm_row_id: expected UUID in protected identity column")
+        errors: list[str] = [identity_error] if identity_error else []
         for field_name, column_index in resolved.items():
             raw_value = row[column_index] if column_index < len(row) else None
             try:
@@ -638,7 +585,7 @@ def parse_sheet_values(
                 checksum=checksum,
                 title=title,
                 crm_row_id=crm_row_id,
-                submission_requested=True,
+                submission_requested=is_submitted,
                 source_payload=source_payload,
                 errors=errors,
             )
@@ -733,7 +680,10 @@ async def plan_rows(
             if parsed.crm_row_id is not None
             else None
         ) or existing_by_row.get(parsed.row_number)
-        if not parsed.submission_requested:
+        if (
+            not parsed.submission_requested
+            and (parsed.crm_row_id is None or existing is None)
+        ):
             planned.append(
                 PlannedRow(
                     parsed=parsed,

@@ -96,11 +96,13 @@ serializes concurrent syncs for the same spreadsheet/tab. A changed source or CR
 
 ## Idempotency and overwrite policy
 
-- A row is eligible only when `Отправка на согласование` contains
+- A new row is eligible only when `Отправка на согласование` contains
   `Отправить` (case and surrounding whitespace are ignored).
-- Rows without that marker are skipped before validation and never receive a
-  CRM identity. The rule applies to both full reconciliation and realtime
-  signed webhooks.
+- Rows without that marker and without a valid protected `crm_row_id` are
+  skipped before validation and never receive a CRM identity.
+- Once a row has a valid CRM identity, scenarist-owned edits synchronize in
+  either direction while the corresponding scenarist stage remains editable.
+  Selecting `Отправить` submits a draft or revision to the next workflow stage.
 - Identity is `(source_sheet_id, source_tab, source_row)` with a database unique constraint.
 - A canonical SHA-256 checksum makes unchanged reimports `skipped`.
 - New scenarios receive the normal server-generated sequential `external_id`.
@@ -110,9 +112,12 @@ serializes concurrent syncs for the same spreadsheet/tab. A changed source or CR
   source updates for that row.
 - Sheet row deletion never archives or deletes CRM data.
 - Moving existing source rows changes their identity; do not reorder an active imported tab.
-- Users/auth, approvals, montage, publication, workflow decisions/statuses, and server IDs are
-  never read from the sheet in v1.
+- Users/auth, approvals, assignments, workflow decisions/statuses, editor-owned
+  montage results, manager-owned controls, publisher results, and server IDs
+  are never read from the sheet.
 
 The approved business column references remain in the four
-`docs/google-sheets-*-mapping.md` files. Only their safe main/research/content subset is imported
-by this adapter; other columns continue to be managed inside CRM.
+`docs/google-sheets-*-mapping.md` files. Inbound sync accepts the scenarist's
+main/research/content fields, source-material fields, and publication-preparation
+fields. All other columns are managed inside CRM and are writeback-only toward
+Google Sheets.

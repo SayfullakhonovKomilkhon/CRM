@@ -153,13 +153,16 @@ spreadsheet/tab in `SheetSource`, accepts timestamped HMAC webhooks, stores idem
 inbound events, processes Redis notifications with PostgreSQL fallback, and records CRM
 changes in a transactional writeback outbox.
 
-The safe v1 inbound scope is scenario main data, research, and scenario content only.
-It never imports users, `external_id`, approvals, montage, publication, assignments outside
-the configured scenarist, or workflow status. Rows use a protected stable `crm_row_id` UUID,
-independent of row number. Approved and production work remains locked; a new Sheets version
-is accepted only during an active scenarist revision returned by responsible/client review,
-and dependent approvals are reset through normal workflow rules. Source deletions never
-delete CRM rows.
+Inbound sync is bidirectional only for scenarist-owned data: scenario
+main/research/content, source-material preparation, and publication-preparation
+fields. It never imports users, `external_id`, approvals, assignments, workflow
+status, manager controls, editor results, client decisions, or publisher
+results. Those CRM-owned values can only travel outward to Google Sheets. Rows
+use a protected stable `crm_row_id` UUID, independent of row number. Approved
+and production work remains locked; a new Sheets version is accepted only
+during an active scenarist revision returned by responsible/client review, and
+dependent approvals are reset through normal workflow rules. Source deletions
+never delete CRM rows.
 
 Outbound writes can touch only fields configured in a source's `writeback_column_map`.
 The identity UUID is written through a separate `crm_row_id_column`. Service-account

@@ -740,6 +740,11 @@ SCENARIST_PUBLICATION_FIELDS = {
     "publication.ai_social_descriptions",
     "publication.leia_script",
 }
+SCENARIST_OWNED_FIELD_NAMES = frozenset(
+    SCENARIST_SCENARIO_FIELDS
+    | SCENARIST_SOURCE_FIELDS
+    | SCENARIST_PUBLICATION_FIELDS
+)
 EDITOR_MANAGER_MONTAGE_FIELDS = {
     "montage.assigned_editor_id",
     "montage.external_editor_name",
