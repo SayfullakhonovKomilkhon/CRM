@@ -167,10 +167,10 @@ function reconcileCrmRows() {
 function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, options) {
   const submissionCell = sheet.getRange(rowNumber, options.submissionColumn);
   const submissionStatus = submissionCell.getDisplayValue().trim();
+  if (!isSubmissionRequested_(submissionStatus)) return false;
   const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
   const rawRowId = rowIdCell.getDisplayValue().trim();
   const hasExistingIdentity = isUuid_(rawRowId);
-  if (!hasExistingIdentity && !isSubmissionRequested_(submissionStatus)) return false;
   const fields = fullRowFields_(sheet, rowNumber, map, {
     includeEmptySourceFields: hasExistingIdentity
   });
@@ -223,9 +223,8 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     throw new Error(response.error || "CRM rejected the row");
   }
   props.setProperty(checksumKey, checksum);
-  // Consuming the marker keeps creation/submission explicit. A linked row can
-  // continue synchronizing scenarist-owned edits through its protected UUID.
-  if (isSubmissionRequested_(submissionStatus)) submissionCell.clearContent();
+  // Consuming the marker makes every Google -> CRM transfer explicit.
+  submissionCell.clearContent();
   return true;
 }
 

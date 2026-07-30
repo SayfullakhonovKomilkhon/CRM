@@ -165,13 +165,13 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert "if (!hasExistingIdentity && !hasMeaningfulFields_(fields))" not in script
 
 
-def test_realtime_inbound_requires_marker_only_for_a_new_row():
+def test_realtime_inbound_requires_explicit_marker_for_every_row():
     assert submission_requested("Отправить") is True
     assert submission_requested("Черновик") is False
     source = inspect.getsource(process_inbound_event)
     assert 'event.raw.get("submission_status")' in source
-    assert "New Sheet row is not marked 'Отправить'" in source
-    assert "scenario is None and not submit_requested" in source
+    assert "Sheet row is not marked 'Отправить'" in source
+    assert "if not submit_requested" in source
 
 
 def test_explicit_submission_accepts_a_row_with_no_other_values():
@@ -290,9 +290,12 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
         ),
         existing,
     )
-    updated = await process_inbound_event(edit_session, edit_session.event.id)
-    assert updated.status == SheetEventStatus.COMPLETED
-    assert existing.speaker == "Обновлено в Google"
+    skipped_existing = await process_inbound_event(
+        edit_session,
+        edit_session.event.id,
+    )
+    assert skipped_existing.status == SheetEventStatus.SKIPPED
+    assert existing.speaker is None
     assert existing.status == ScenarioStatus.DRAFT
 
     source.inbound_column_map = {
@@ -310,7 +313,7 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     )
     legacy_session = InboundSession(
         inbound_event(
-            "",
+            "Отправить",
             {
                 "speaker": "Разрешённое изменение",
                 "approval.responsible_review.decision": "approved",

@@ -484,11 +484,6 @@ def parse_sheet_values(
         data_rows = data_rows[:max_rows]
 
     parsed_rows: list[ParsedSheetRow] = []
-    identity_index = (
-        _column_number(crm_row_id_column) - 1
-        if crm_row_id_column
-        else None
-    )
     for offset, row in enumerate(data_rows, start=1):
         row_number = config.header_row + offset
         if not any(str(value).strip() for value in row):
@@ -497,18 +492,7 @@ def parse_sheet_values(
         is_submitted = submission_requested(
             row[submission_index] if submission_index < len(row) else None
         )
-        crm_row_id = None
-        identity_error = None
-        if identity_index is not None:
-            identity_value = row[identity_index] if identity_index < len(row) else None
-            if str(identity_value or "").strip():
-                try:
-                    crm_row_id = uuid.UUID(str(identity_value).strip())
-                except ValueError:
-                    identity_error = (
-                        "crm_row_id: expected UUID in protected identity column"
-                    )
-        if not is_submitted and crm_row_id is None:
+        if not is_submitted:
             parsed_rows.append(
                 ParsedSheetRow(
                     row_number=row_number,
@@ -521,7 +505,18 @@ def parse_sheet_values(
             )
             continue
         mapped: dict[str, Any] = {}
-        errors: list[str] = [identity_error] if identity_error else []
+        errors: list[str] = []
+        crm_row_id = None
+        if crm_row_id_column:
+            identity_index = _column_number(crm_row_id_column) - 1
+            identity_value = row[identity_index] if identity_index < len(row) else None
+            if str(identity_value or "").strip():
+                try:
+                    crm_row_id = uuid.UUID(str(identity_value).strip())
+                except ValueError:
+                    errors.append(
+                        "crm_row_id: expected UUID in protected identity column"
+                    )
         for field_name, column_index in resolved.items():
             raw_value = row[column_index] if column_index < len(row) else None
             try:
@@ -585,7 +580,7 @@ def parse_sheet_values(
                 checksum=checksum,
                 title=title,
                 crm_row_id=crm_row_id,
-                submission_requested=is_submitted,
+                submission_requested=True,
                 source_payload=source_payload,
                 errors=errors,
             )
@@ -680,10 +675,7 @@ async def plan_rows(
             if parsed.crm_row_id is not None
             else None
         ) or existing_by_row.get(parsed.row_number)
-        if (
-            not parsed.submission_requested
-            and (parsed.crm_row_id is None or existing is None)
-        ):
+        if not parsed.submission_requested:
             planned.append(
                 PlannedRow(
                     parsed=parsed,

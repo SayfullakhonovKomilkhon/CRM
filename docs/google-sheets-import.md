@@ -96,13 +96,13 @@ serializes concurrent syncs for the same spreadsheet/tab. A changed source or CR
 
 ## Idempotency and overwrite policy
 
-- A new row is eligible only when `Отправка на согласование` contains
+- A row is eligible only when `Отправка на согласование` contains
   `Отправить` (case and surrounding whitespace are ignored).
-- Rows without that marker and without a valid protected `crm_row_id` are
-  skipped before validation and never receive a CRM identity.
-- Once a row has a valid CRM identity, scenarist-owned edits synchronize in
-  either direction while the corresponding scenarist stage remains editable.
-  Selecting `Отправить` submits a draft or revision to the next workflow stage.
+- Rows without that marker are skipped before validation. This also applies to
+  rows that already have a protected `crm_row_id`.
+- CRM changes write back to Google automatically. Google changes remain in the
+  Sheet until the scenarist selects `Отправить`; that action transfers the
+  scenarist-owned fields and submits a draft or revision to the next stage.
 - Identity is `(source_sheet_id, source_tab, source_row)` with a database unique constraint.
 - A canonical SHA-256 checksum makes unchanged reimports `skipped`.
 - New scenarios receive the normal server-generated sequential `external_id`.

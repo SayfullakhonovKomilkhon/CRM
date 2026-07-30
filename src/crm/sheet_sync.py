@@ -361,6 +361,11 @@ async def process_inbound_event(
         event.processed_at = datetime.now(UTC)
         return event
     submit_requested = submission_requested(event.raw.get("submission_status"))
+    if not submit_requested:
+        event.status = SheetEventStatus.SKIPPED
+        event.error = "Sheet row is not marked 'Отправить' for approval"
+        event.processed_at = datetime.now(UTC)
+        return event
     allowed = (
         set(source.inbound_column_map)
         & set(SAFE_IMPORT_FIELDS)
@@ -372,7 +377,7 @@ async def process_inbound_event(
         if field_name in allowed
     }
     ignored_fields = sorted(set(event.changed_fields) - allowed)
-    if ignored_fields and not inbound_fields and not submit_requested:
+    if ignored_fields and not inbound_fields:
         event.status = SheetEventStatus.SKIPPED
         event.error = (
             "Sheet edit contains only CRM-owned fields: "
@@ -396,11 +401,6 @@ async def process_inbound_event(
         )
         .with_for_update()
     )
-    if scenario is None and not submit_requested:
-        event.status = SheetEventStatus.SKIPPED
-        event.error = "New Sheet row is not marked 'Отправить' for approval"
-        event.processed_at = datetime.now(UTC)
-        return event
     if scenario is not None and scenario.source_checksum == event.checksum:
         event.status = SheetEventStatus.SKIPPED
         event.error = "Checksum already applied"
@@ -441,10 +441,7 @@ async def process_inbound_event(
         if ignored_fields:
             source_payload["last_ignored_sheet_fields"] = ignored_fields
         scenario.source_payload = source_payload
-        if (
-            submit_requested
-            and scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}
-        ):
+        if scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
             submit_for_responsible_review(scenario)
     except (ValueError, ValidationError) as error:
         if scenario_was_new:

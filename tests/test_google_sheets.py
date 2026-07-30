@@ -153,7 +153,7 @@ def test_sheet_inbound_allowlist_excludes_other_role_fields():
     assert "publication.publisher_status" not in SAFE_IMPORT_FIELDS
 
 
-def test_existing_identified_row_is_parsed_without_a_new_submission_marker():
+def test_existing_identified_row_is_skipped_without_submission_marker():
     row_id = uuid.uuid4()
     snapshot = parse_sheet_values(
         [
@@ -167,9 +167,9 @@ def test_existing_identified_row_is_parsed_without_a_new_submission_marker():
     )
 
     row = snapshot.rows[0]
-    assert row.crm_row_id == row_id
+    assert row.crm_row_id is None
     assert row.submission_requested is False
-    assert row.payload["content"]["script_text"] == "Обновлено в Google"
+    assert row.payload is None
 
 
 def test_workflow_import_derives_published_status_and_keeps_all_decisions():

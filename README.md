@@ -153,9 +153,11 @@ spreadsheet/tab in `SheetSource`, accepts timestamped HMAC webhooks, stores idem
 inbound events, processes Redis notifications with PostgreSQL fallback, and records CRM
 changes in a transactional writeback outbox.
 
-Inbound sync is bidirectional only for scenarist-owned data: scenario
+Only scenarist-owned data can travel in both directions: scenario
 main/research/content, source-material preparation, and publication-preparation
-fields. It never imports users, `external_id`, approvals, assignments, workflow
+fields. Every Google-to-CRM transfer still requires the row marker
+`Отправить`; CRM-to-Google writeback is automatic. It never imports users,
+`external_id`, approvals, assignments, workflow
 status, manager controls, editor results, client decisions, or publisher
 results. Those CRM-owned values can only travel outward to Google Sheets. Rows
 use a protected stable `crm_row_id` UUID, independent of row number. Approved

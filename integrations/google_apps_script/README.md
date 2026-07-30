@@ -13,13 +13,13 @@ it in either inbound or writeback maps. Google API writes do not invoke
 installable `onEdit` triggers; the origin marker is an additional suppression
 guard for any future Apps Script write helper.
 
-New rows are sent to CRM only when the header row contains exactly one
+Rows are sent to CRM only when the header row contains exactly one
 `Отправка на согласование` column and that row contains `Отправить`. The marker
-is cleared after a successful webhook response. Once CRM has written a protected
-`crm_row_id`, later edits to scenarist-owned columns synchronize without another
-marker while the scenarist stage is editable. Another `Отправить` explicitly
-submits a draft or revision to the manager. When header lookup is not suitable,
-`CRM_SUBMISSION_COLUMN` may contain the column letters (for example, `AC`).
+is cleared after a successful webhook response. This rule applies to both new
+and already linked rows: Google edits remain drafts in the Sheet until the
+scenarist explicitly selects `Отправить` again. When header lookup is not
+suitable, `CRM_SUBMISSION_COLUMN` may contain the column letters (for example,
+`AC`).
 
 The script sends only the fields in `CRM_SCENARIST_INBOUND_FIELDS`. Approval,
 assignment, editor, client, manager, and publisher fields are CRM-owned:
