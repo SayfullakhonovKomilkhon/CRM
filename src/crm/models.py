@@ -65,6 +65,14 @@ class ApprovalDecision(StrEnum):
     REJECTED = "rejected"
 
 
+class SourceMaterialStatus(StrEnum):
+    DRAFT = "draft"
+    READY_FOR_REVIEW = "ready_for_review"
+    REVISION = "revision"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class GateDecision(StrEnum):
     PENDING = "pending"
     APPROVED = "approved"

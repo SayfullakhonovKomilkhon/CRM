@@ -111,6 +111,11 @@ def test_sheet_registry_contains_every_persisted_workflow_field() -> None:
     assert expected <= columns
 
 
+def test_source_material_status_is_server_controlled_for_scenarist() -> None:
+    assert "montage.material_status" not in SCENARIST_SOURCE_FIELDS
+    assert "material_status" not in API_SCENARIST_MONTAGE_FIELDS
+
+
 def test_editor_can_edit_only_result_fields_during_active_stage() -> None:
     scenario = SimpleNamespace(
         status=ScenarioStatus.EDITING,

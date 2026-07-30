@@ -8,6 +8,7 @@ from crm.models import (
     Role,
     Scenario,
     ScenarioStatus,
+    SourceMaterialStatus,
 )
 
 EDITOR_VISIBLE_STATUSES = frozenset(
@@ -133,7 +134,11 @@ def stage_prerequisites_met(scenario: Scenario, stage: ApprovalStage) -> bool:
         return bool(
             is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
             and scenario.montage
-            and scenario.montage.source_material_url
+            and (
+                getattr(scenario.montage, "material_status", None)
+                == SourceMaterialStatus.READY_FOR_REVIEW
+                or is_approved(scenario, ApprovalStage.SOURCE_MATERIAL)
+            )
         )
     if stage == ApprovalStage.MONTAGE_COMPLIANCE:
         return bool(
@@ -162,7 +167,7 @@ def require_stage_prerequisites(scenario: Scenario, stage: ApprovalStage) -> Non
             "Responsible manager approval is required before client review"
         ),
         ApprovalStage.SOURCE_MATERIAL: (
-            "Client script approval and source material are required"
+            "The scenarist must submit source material for review"
         ),
         ApprovalStage.MONTAGE_COMPLIANCE: (
             "The client/source approval chain and ready material are required"

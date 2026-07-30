@@ -48,6 +48,7 @@ SHEETS_ORIGIN = "sheets"
 CRM_ORIGIN = "crm"
 COLUMN_RE = re.compile(r"^[A-Z]{1,3}$")
 WRITEBACK_FIELDS = frozenset({item.field for item in SHEET_FIELDS} | {"comments.latest"})
+REALTIME_SERVER_CONTROLLED_FIELDS = frozenset({"montage.material_status"})
 
 
 def source_webhook_secret(settings: Settings, source: SheetSource) -> str:
@@ -358,7 +359,11 @@ async def process_inbound_event(
         event.error = "CRM-origin event suppressed"
         event.processed_at = datetime.now(UTC)
         return event
-    allowed = set(source.inbound_column_map) & set(SAFE_IMPORT_FIELDS)
+    allowed = (
+        set(source.inbound_column_map)
+        & set(SAFE_IMPORT_FIELDS)
+        - set(REALTIME_SERVER_CONTROLLED_FIELDS)
+    )
     unsupported = sorted(set(event.changed_fields) - allowed)
     if unsupported:
         event.status = SheetEventStatus.FAILED

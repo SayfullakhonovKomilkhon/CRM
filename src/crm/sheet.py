@@ -160,6 +160,7 @@ SHEET_FIELDS = (
     ),
     field("montage.client_brand_style", "Фирменный стиль", "Монтаж", PRODUCTION_ROLES, "detail"),
     field("montage.extra_brief", "Дополнительное ТЗ", "Монтаж", PRODUCTION_ROLES, "detail"),
+    field("montage.material_status", "Статус материалов", "Монтаж", PRODUCTION_ROLES, "inline"),
     field(
         "approval.source_material.decision",
         "Одобрение исходника",
@@ -179,7 +180,6 @@ SHEET_FIELDS = (
     field("montage.external_editor_name", "Внешний монтажёр", "Монтаж", PRODUCTION_ROLES, "inline"),
     field("montage.price", "Цена монтажа", "Монтаж", PRODUCTION_ROLES, "inline"),
     field("montage.payment_due_date", "Период оплаты", "Монтаж", PRODUCTION_ROLES, "inline"),
-    field("montage.material_status", "Статус материалов", "Монтаж", PRODUCTION_ROLES, "inline"),
     field(
         "montage.scenarist_material_comment",
         "Комментарий сценариста к материалам",
@@ -587,7 +587,6 @@ SCENARIST_SOURCE_FIELDS = {
     "montage.source_material_url",
     "montage.client_brand_style",
     "montage.extra_brief",
-    "montage.material_status",
     "montage.scenarist_material_comment",
     "montage.scenarist_revision_status",
     "montage.scenarist_revision_comment",

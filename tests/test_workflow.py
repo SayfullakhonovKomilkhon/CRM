@@ -3,7 +3,13 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from crm.models import ApprovalDecision, ApprovalStage, Role, ScenarioStatus
+from crm.models import (
+    ApprovalDecision,
+    ApprovalStage,
+    Role,
+    ScenarioStatus,
+    SourceMaterialStatus,
+)
 from crm.workflow import (
     EDITOR_VISIBLE_STATUSES,
     publication_section_available,
@@ -23,6 +29,7 @@ def scenario(
     script_text="Script",
     source_url=None,
     ready_url=None,
+    material_status=None,
     editor_id=None,
     publication=None,
 ):
@@ -34,6 +41,7 @@ def scenario(
             source_material_url=source_url,
             ready_material_url=ready_url,
             assigned_editor_id=editor_id,
+            material_status=material_status,
         ),
         publication=publication,
     )
@@ -71,6 +79,17 @@ def test_workflow_rejects_skipping_required_approvals() -> None:
     with pytest.raises(HTTPException) as error:
         require_stage_prerequisites(value, ApprovalStage.SOURCE_MATERIAL)
     assert error.value.status_code == 409
+
+
+def test_source_review_requires_explicit_row_submission() -> None:
+    value = scenario(
+        approvals=[approval(ApprovalStage.PRE_GENERATION_CLIENT)],
+        source_url="https://example.com/source",
+    )
+    assert stage_prerequisites_met(value, ApprovalStage.SOURCE_MATERIAL) is False
+
+    value.montage.material_status = SourceMaterialStatus.READY_FOR_REVIEW
+    assert stage_prerequisites_met(value, ApprovalStage.SOURCE_MATERIAL) is True
 
 
 def test_late_client_stage_is_locked_when_pre_generation_is_missing() -> None:

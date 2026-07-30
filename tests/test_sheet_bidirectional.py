@@ -22,6 +22,7 @@ from crm.models import (
 from crm.routers import scenarios as scenario_routes
 from crm.schemas import ScenarioCreate
 from crm.sheet_sync import (
+    REALTIME_SERVER_CONTROLLED_FIELDS,
     WRITEBACK_FIELDS,
     _set_values,
     active_scenarist_revision_stage,
@@ -85,6 +86,10 @@ def test_scenarist_revision_accepts_sheet_edit_without_automatic_resubmit(stage)
     assert next(item for item in value.approvals if item.stage == stage).decision == (
         ApprovalDecision.REVISION
     )
+
+
+def test_realtime_sheet_edits_cannot_submit_source_material() -> None:
+    assert "montage.material_status" in REALTIME_SERVER_CONTROLLED_FIELDS
 
 
 @pytest.mark.parametrize(

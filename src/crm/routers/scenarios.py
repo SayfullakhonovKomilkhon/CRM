@@ -37,6 +37,7 @@ from crm.models import (
     ScenarioResearch,
     ScenarioStatus,
     SheetSource,
+    SourceMaterialStatus,
     User,
 )
 from crm.schemas import (
@@ -126,10 +127,15 @@ SCENARIST_MONTAGE_FIELDS = {
     "source_material_url",
     "client_brand_style",
     "extra_brief",
-    "material_status",
     "scenarist_material_comment",
     "scenarist_revision_status",
     "scenarist_revision_comment",
+}
+SOURCE_MATERIAL_CONTENT_FIELDS = {
+    "source_material_url",
+    "client_brand_style",
+    "extra_brief",
+    "scenarist_material_comment",
 }
 EDITOR_MANAGER_MONTAGE_FIELDS = {
     "assigned_editor_id",
@@ -170,6 +176,17 @@ def require_source_editor_assignment(
             status_code=status.HTTP_409_CONFLICT,
             detail="Assign an editor before approving source material",
         )
+
+
+def source_material_status_after_decision(
+    decision: ApprovalDecision,
+) -> SourceMaterialStatus:
+    return {
+        ApprovalDecision.PENDING: SourceMaterialStatus.READY_FOR_REVIEW,
+        ApprovalDecision.APPROVED: SourceMaterialStatus.APPROVED,
+        ApprovalDecision.REVISION: SourceMaterialStatus.REVISION,
+        ApprovalDecision.REJECTED: SourceMaterialStatus.REJECTED,
+    }[decision]
 
 
 def open_final_revision_gate(scenario: Scenario, request_comment: str) -> None:
@@ -440,9 +457,6 @@ def queue_filter(queue: ScenarioQueue, user: User):
     nonempty_script = Scenario.content.has(
         func.nullif(ScenarioContent.script_text, "").is_not(None)
     )
-    nonempty_source = Scenario.montage.has(
-        func.nullif(MontageTask.source_material_url, "").is_not(None)
-    )
     nonempty_ready = Scenario.montage.has(
         func.nullif(MontageTask.ready_material_url, "").is_not(None)
     )
@@ -456,7 +470,10 @@ def queue_filter(queue: ScenarioQueue, user: User):
         return and_(
             Scenario.status == ScenarioStatus.SENT_TO_GENERATION,
             _approval_approved(ApprovalStage.PRE_GENERATION_CLIENT),
-            nonempty_source,
+            Scenario.montage.has(
+                MontageTask.material_status
+                == SourceMaterialStatus.READY_FOR_REVIEW.value
+            ),
             _approval_pending(ApprovalStage.SOURCE_MATERIAL),
         )
     if queue == ScenarioQueue.EDITOR_MANAGER_INWORK:
@@ -1188,7 +1205,9 @@ async def patch_scenario_sheet_row(
             value = require_assignable_editor(await session.get(User, value)).id
         script_changed |= change.field == "content.script_text" and old_value != value
         source_material_changed |= (
-            change.field == "montage.source_material_url" and old_value != value
+            target_name == "montage"
+            and attribute in SOURCE_MATERIAL_CONTENT_FIELDS
+            and old_value != value
         )
         ready_material_changed |= (
             change.field == "montage.ready_material_url" and old_value != value
@@ -1204,6 +1223,8 @@ async def patch_scenario_sheet_row(
             scenario.status = ScenarioStatus.DRAFT
     if source_material_changed:
         reset_approvals_from(scenario, ApprovalStage.SOURCE_MATERIAL)
+        if scenario.montage is not None:
+            scenario.montage.material_status = SourceMaterialStatus.DRAFT
         scenario.status = (
             ScenarioStatus.SENT_TO_GENERATION
             if is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
@@ -1262,6 +1283,10 @@ async def patch_scenario_sheet_row(
             approval.decided_at = (
                 None if decision == ApprovalDecision.PENDING else datetime.now(UTC)
             )
+            if stage == ApprovalStage.SOURCE_MATERIAL and scenario.montage is not None:
+                scenario.montage.material_status = source_material_status_after_decision(
+                    decision
+                )
             if decision != ApprovalDecision.APPROVED:
                 reset_downstream_approvals(scenario, stage)
             if stage == ApprovalStage.FINAL_CLIENT and decision in {
@@ -1447,10 +1472,20 @@ async def patch_scenario_sheet_row(
             scenario.status = status_after_unpublishing(scenario)
 
     scenario.updated_at = datetime.now(UTC)
+    writeback_changes = {change.field: change.value for change in payload.changes}
+    if source_material_changed:
+        writeback_changes["montage.material_status"] = SourceMaterialStatus.DRAFT.value
+    source_decision = approval_changes.get(ApprovalStage.SOURCE_MATERIAL, {}).get(
+        "decision"
+    )
+    if source_decision is not None and scenario.montage is not None:
+        writeback_changes["montage.material_status"] = (
+            scenario.montage.material_status
+        )
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {change.field: change.value for change in payload.changes},
+        writeback_changes,
     )
     await session.commit()
     await session.refresh(scenario)
@@ -1597,6 +1632,74 @@ async def submit_scenario_for_review(
     return scenario_for_role(updated, user)
 
 
+@router.post("/{scenario_id}/source-material/submit", response_model=ScenarioRead)
+async def submit_source_material_for_review(
+    scenario_id: uuid.UUID,
+    user: User = Depends(require_roles(Role.SCENARIST)),
+    session: AsyncSession = Depends(get_session),
+) -> ScenarioRead:
+    """Explicitly send one scenario's source package to the editor manager."""
+    scenario = await get_visible_scenario(session, scenario_id, user, for_update=True)
+    if scenario.assigned_scenarist_id != user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the assigned scenarist can submit source material",
+        )
+    if not is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The client must approve the scenario first",
+        )
+    if scenario.status != ScenarioStatus.SENT_TO_GENERATION:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Source material is not waiting for scenarist submission",
+        )
+    if scenario.montage is None:
+        scenario.montage = MontageTask()
+    if scenario.montage.material_status == SourceMaterialStatus.READY_FOR_REVIEW:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Source material has already been submitted",
+        )
+    if scenario.montage.material_status == SourceMaterialStatus.REJECTED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Rejected source material cannot be resubmitted",
+        )
+
+    approval = approval_for(scenario, ApprovalStage.SOURCE_MATERIAL)
+    if approval is not None and approval.decision == ApprovalDecision.APPROVED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Source material has already been approved",
+        )
+    reset_downstream_approvals(scenario, ApprovalStage.SOURCE_MATERIAL)
+    if approval is None:
+        approval = ScenarioApproval(stage=ApprovalStage.SOURCE_MATERIAL)
+        scenario.approvals.append(approval)
+    approval.decision = ApprovalDecision.PENDING
+    approval.decided_by_id = None
+    approval.decided_at = None
+    scenario.montage.material_status = SourceMaterialStatus.READY_FOR_REVIEW
+    scenario.updated_at = datetime.now(UTC)
+    await enqueue_sheet_writeback(
+        session,
+        scenario,
+        {
+            "montage.material_status": SourceMaterialStatus.READY_FOR_REVIEW.value,
+            "approval.source_material.decision": ApprovalDecision.PENDING.value,
+        },
+    )
+    await session.commit()
+    updated = await session.scalar(
+        select(Scenario).where(Scenario.id == scenario.id).options(*LOAD_SCENARIO)
+    )
+    if updated is None:  # pragma: no cover
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Scenario not found")
+    return scenario_for_role(updated, user)
+
+
 @router.put("/{scenario_id}/approvals/{stage}", response_model=ApprovalRead)
 async def set_approval(
     scenario_id: uuid.UUID,
@@ -1642,6 +1745,10 @@ async def set_approval(
     approval.decided_at = (
         None if payload.decision == ApprovalDecision.PENDING else datetime.now(UTC)
     )
+    if stage == ApprovalStage.SOURCE_MATERIAL and scenario.montage is not None:
+        scenario.montage.material_status = source_material_status_after_decision(
+            payload.decision
+        )
     if payload.decision != ApprovalDecision.APPROVED:
         reset_downstream_approvals(scenario, stage)
     if stage == ApprovalStage.FINAL_CLIENT and payload.decision in {
@@ -1655,6 +1762,10 @@ async def set_approval(
         f"approval.{stage.value}.decision": payload.decision.value,
         f"approval.{stage.value}.comment": payload.comment,
     }
+    if stage == ApprovalStage.SOURCE_MATERIAL and scenario.montage is not None:
+        approval_writeback["montage.material_status"] = (
+            scenario.montage.material_status
+        )
     if "note" in payload.model_fields_set:
         approval_writeback[f"approval.{stage.value}.note"] = payload.note
     if stage == ApprovalStage.FINAL_CLIENT and scenario.final_revision_gate is not None:
@@ -1810,22 +1921,29 @@ async def update_montage(
         montage_changes["assigned_editor_id"] = require_assignable_editor(
             await session.get(User, montage_changes["assigned_editor_id"])
         ).id
-    source_material_changed = (
-        "source_material_url" in montage_changes
-        and scenario.montage.source_material_url != montage_changes["source_material_url"]
+    source_material_changed = any(
+        field in montage_changes
+        and getattr(scenario.montage, field) != montage_changes[field]
+        for field in SOURCE_MATERIAL_CONTENT_FIELDS
     )
     for key, value in montage_changes.items():
         setattr(scenario.montage, key, value)
     if source_material_changed:
         reset_approvals_from(scenario, ApprovalStage.SOURCE_MATERIAL)
+        scenario.montage.material_status = SourceMaterialStatus.DRAFT
         scenario.status = ScenarioStatus.SENT_TO_GENERATION
     if scenario.montage.assigned_editor_id and is_approved(scenario, ApprovalStage.SOURCE_MATERIAL):
         scenario.status = ScenarioStatus.HANDED_TO_EDITOR
     scenario.updated_at = datetime.now(UTC)
+    writeback_changes = {
+        f"montage.{key}": value for key, value in montage_changes.items()
+    }
+    if source_material_changed:
+        writeback_changes["montage.material_status"] = SourceMaterialStatus.DRAFT.value
     await enqueue_sheet_writeback(
         session,
         scenario,
-        {f"montage.{key}": value for key, value in montage_changes.items()},
+        writeback_changes,
     )
     await session.commit()
     updated = await get_visible_scenario(session, scenario.id, user)
