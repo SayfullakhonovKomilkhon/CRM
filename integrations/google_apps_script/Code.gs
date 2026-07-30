@@ -113,10 +113,12 @@ function reconcileCrmRows() {
 }
 
 function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, options) {
-  const fields = fullRowFields_(sheet, rowNumber, map);
   const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
   const rawRowId = rowIdCell.getDisplayValue().trim();
   const hasExistingIdentity = isUuid_(rawRowId);
+  const fields = fullRowFields_(sheet, rowNumber, map, {
+    includeEmptySourceFields: hasExistingIdentity
+  });
   if (!hasExistingIdentity && !hasMeaningfulFields_(fields)) return false;
 
   let rowId = rawRowId;
@@ -180,7 +182,7 @@ function rowIdAppearsEarlier_(sheet, rowNumber, rowIdColumn, rowId, props) {
   ).getDisplayValues().some((values) => values[0].trim() === rowId);
 }
 
-function fullRowFields_(sheet, rowNumber, map) {
+function fullRowFields_(sheet, rowNumber, map, options) {
   const columns = Object.keys(map)
     .map(Number)
     .filter((column) => Number.isFinite(column))
@@ -199,9 +201,19 @@ function fullRowFields_(sheet, rowNumber, map) {
     const field = map[String(column)];
     if (!field || CRM_REALTIME_EXCLUDED_FIELDS.has(field)) return;
     const value = values[column - firstColumn];
+    if (value === "" && (
+      !options.includeEmptySourceFields || isWorkflowField_(field)
+    )) return;
     fields[field] = value === "" ? null : value;
   });
   return fields;
+}
+
+function isWorkflowField_(field) {
+  return field.startsWith("approval.") ||
+    field.startsWith("montage.") ||
+    field.startsWith("publication.") ||
+    field.startsWith("final_revision_gate.");
 }
 
 function hasMeaningfulFields_(fields) {
