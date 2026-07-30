@@ -124,6 +124,11 @@ this restriction even if a manager sends another role manually. `GET /users` sup
 scenario managers. `GET /clients` and `GET /projects` support `active_only=false` for archive
 screens.
 
+`POST /clients/with-account` atomically creates a client company and its first login account
+with the `client` role. The request includes the company name/external ID plus the account
+full name, email, and temporary password. Duplicate data or invalid credentials leave
+neither record partially created.
+
 The full client and project catalogs are readable by all three manager levels and scenarists.
 Client users receive only their own client and projects. Editors and publishers receive
 `403` from both catalog endpoints. Write operations remain manager-only.

@@ -12,7 +12,13 @@ from crm.routers.catalog import (
     require_catalog_reader,
     resolve_user_client_id,
 )
-from crm.schemas import ClientUpdate, ProjectUpdate, UserAdminCreate, UserAdminUpdate
+from crm.schemas import (
+    ClientUpdate,
+    ClientWithAccountCreate,
+    ProjectUpdate,
+    UserAdminCreate,
+    UserAdminUpdate,
+)
 
 
 class FakeSession:
@@ -54,6 +60,32 @@ def test_admin_user_create_normalizes_email_and_validates_password() -> None:
             full_name="Пользователь",
             role=Role.EDITOR,
             password="short",
+        )
+
+
+def test_client_with_account_requires_valid_credentials() -> None:
+    payload = ClientWithAccountCreate(
+        name="Компания",
+        external_id="company-1",
+        account_full_name="Клиент",
+        account_email="CLIENT@Example.COM",
+        account_password="password8",
+    )
+    assert str(payload.account_email) == "CLIENT@example.com"
+
+    with pytest.raises(ValidationError):
+        ClientWithAccountCreate(
+            name="Компания",
+            account_full_name="Клиент",
+            account_email="client@example.com",
+            account_password="short",
+        )
+    with pytest.raises(ValidationError):
+        ClientWithAccountCreate(
+            name="Компания",
+            account_full_name="Клиент",
+            account_email="client@crm.local",
+            account_password="password8",
         )
 
 

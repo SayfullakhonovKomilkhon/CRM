@@ -354,6 +354,21 @@ class ClientRead(ORMModel):
     is_active: bool
 
 
+class ClientWithAccountCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str = Field(min_length=1, max_length=255)
+    external_id: str | None = Field(default=None, max_length=100)
+    account_full_name: str = Field(min_length=1, max_length=255)
+    account_email: EmailStr
+    account_password: str = Field(min_length=8, max_length=1024)
+
+
+class ClientWithAccountRead(BaseModel):
+    client: ClientRead
+    user: UserAdminRead
+
+
 class ClientUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 

@@ -13,6 +13,8 @@ from crm.schemas import (
     ClientCreate,
     ClientRead,
     ClientUpdate,
+    ClientWithAccountCreate,
+    ClientWithAccountRead,
     ProjectCreate,
     ProjectRead,
     ProjectUpdate,
@@ -75,6 +77,63 @@ async def create_client(
         ) from error
     await session.refresh(client)
     return client
+
+
+@router.post(
+    "/clients/with-account",
+    response_model=ClientWithAccountRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_client_with_account(
+    payload: ClientWithAccountCreate,
+    _: User = Depends(require_roles(Role.ADMIN)),
+    session: AsyncSession = Depends(get_session),
+) -> ClientWithAccountRead:
+    duplicate_conditions = [func.lower(Client.name) == payload.name.lower()]
+    if payload.external_id:
+        duplicate_conditions.append(Client.external_id == payload.external_id)
+    duplicate_client = await session.scalar(
+        select(Client.id).where(or_(*duplicate_conditions))
+    )
+    if duplicate_client is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Client with this name or external_id already exists",
+        )
+
+    email = str(payload.account_email).lower()
+    duplicate_user = await session.scalar(
+        select(User.id).where(func.lower(User.email) == email)
+    )
+    if duplicate_user is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User with this email already exists",
+        )
+
+    client = Client(name=payload.name, external_id=payload.external_id)
+    session.add(client)
+    try:
+        await session.flush()
+        account = User(
+            email=email,
+            full_name=payload.account_full_name,
+            role=Role.CLIENT,
+            client_id=client.id,
+            password_hash=hash_password(payload.account_password),
+        )
+        session.add(account)
+        await session.commit()
+    except IntegrityError as error:
+        await session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Client name, external_id, or account email already exists",
+        ) from error
+
+    await session.refresh(client)
+    await session.refresh(account)
+    return ClientWithAccountRead(client=client, user=account)
 
 
 @router.patch("/clients/{client_id}", response_model=ClientRead)
