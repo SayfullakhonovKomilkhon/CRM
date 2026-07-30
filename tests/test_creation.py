@@ -9,6 +9,7 @@ from crm.creation import (
     require_active_project,
     require_assignable_editor,
     require_assignable_publisher,
+    require_exact_sheet_source,
     resolve_scenarist_assignment,
 )
 from crm.models import Role
@@ -67,7 +68,10 @@ def test_manager_can_assign_only_an_active_scenarist() -> None:
     manager = actor(Role.MANAGER)
     scenarist = actor(Role.SCENARIST)
 
-    assert resolve_scenarist_assignment(manager, None, None) is None
+    with pytest.raises(HTTPException) as required:
+        resolve_scenarist_assignment(manager, None, None)
+    assert required.value.status_code == 422
+    assert "assigned_scenarist_id" in required.value.detail
     assert (
         resolve_scenarist_assignment(manager, scenarist.id, scenarist) == scenarist.id
     )
@@ -85,6 +89,21 @@ def test_manager_can_assign_only_an_active_scenarist() -> None:
     with pytest.raises(HTTPException) as wrong_role:
         resolve_scenarist_assignment(manager, editor.id, editor)
     assert wrong_role.value.status_code == 409
+
+
+def test_scenario_creation_requires_one_exact_sheet_source() -> None:
+    source = SimpleNamespace(id=uuid.uuid4())
+    assert require_exact_sheet_source([source]) is source
+
+    with pytest.raises(HTTPException) as missing:
+        require_exact_sheet_source([])
+    assert missing.value.status_code == 409
+    assert "not configured" in missing.value.detail
+
+    with pytest.raises(HTTPException) as ambiguous:
+        require_exact_sheet_source([source, SimpleNamespace(id=uuid.uuid4())])
+    assert ambiguous.value.status_code == 409
+    assert "Multiple active" in ambiguous.value.detail
 
 
 def test_montage_assignment_requires_an_active_editor() -> None:

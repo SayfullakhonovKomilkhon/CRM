@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Sequence
 
 from fastapi import HTTPException, status
 
@@ -80,7 +81,7 @@ def resolve_scenarist_assignment(
     actor: User,
     requested_id: uuid.UUID | None,
     requested_user: User | None,
-) -> uuid.UUID | None:
+) -> uuid.UUID:
     if actor.role == Role.SCENARIST:
         if requested_id is not None and requested_id != actor.id:
             raise HTTPException(
@@ -89,5 +90,30 @@ def resolve_scenarist_assignment(
             )
         return actor.id
     if requested_id is None:
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="assigned_scenarist_id is required for scenario manager",
+        )
     return require_assignable_scenarist(requested_user).id
+
+
+def require_exact_sheet_source[SheetSourceT](
+    sources: Sequence[SheetSourceT],
+) -> SheetSourceT:
+    if not sources:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Google Sheets source is not configured for this project "
+                "and scenarist"
+            ),
+        )
+    if len(sources) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Multiple active Google Sheets sources match this project "
+                "and scenarist"
+            ),
+        )
+    return sources[0]

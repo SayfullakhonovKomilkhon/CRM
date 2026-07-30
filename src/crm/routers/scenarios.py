@@ -14,6 +14,7 @@ from crm.creation import (
     require_assignable_editor,
     require_assignable_publisher,
     require_assignable_scenarist,
+    require_exact_sheet_source,
     resolve_scenarist_assignment,
 )
 from crm.database import get_session
@@ -38,6 +39,8 @@ from crm.models import (
     ScenarioResearch,
     ScenarioStatus,
     SheetSource,
+    SheetWritebackEvent,
+    SheetWritebackStatus,
     SourceMaterialStatus,
     User,
 )
@@ -71,6 +74,7 @@ from crm.schemas import (
     ScenarioSortBy,
     ScenarioUpdate,
     ScenaristSummary,
+    SheetColumnRead,
     SheetRowPatch,
     SheetRowPatchResult,
     SheetScenarioPage,
@@ -78,7 +82,12 @@ from crm.schemas import (
     SortOrder,
     normalize_http_url,
 )
-from crm.sheet import columns_for_role, editable_fields_for_role, values_for_role
+from crm.sheet import (
+    SHEET_FIELDS,
+    columns_for_role,
+    editable_fields_for_role,
+    values_for_role,
+)
 from crm.sheet_sync import enqueue_sheet_writeback
 from crm.workflow import (
     EDITOR_ACTION_STATUSES,
@@ -116,6 +125,30 @@ CLIENT_APPROVAL_STAGES = {
     ApprovalStage.PRE_GENERATION_CLIENT,
     ApprovalStage.FINAL_CLIENT,
 }
+
+SYNC_STATUS_FIELD = "sync.status"
+SYNC_STATUS_ROLES = {Role.MANAGER, Role.SCENARIST}
+
+
+def sheet_sync_status_for_scenario(
+    scenario: Scenario,
+    latest_status: SheetWritebackStatus | None,
+) -> str:
+    if scenario.sheet_source_id is None:
+        return "not_configured"
+    if latest_status in {
+        SheetWritebackStatus.PENDING,
+        SheetWritebackStatus.PROCESSING,
+    }:
+        return "syncing"
+    if latest_status == SheetWritebackStatus.FAILED:
+        return "error"
+    if (
+        latest_status == SheetWritebackStatus.COMPLETED
+        or scenario.source_row is not None
+    ):
+        return "synced"
+    return "waiting"
 
 REJECTED_COMMENT_STAGES = {
     *CLIENT_APPROVAL_STAGES,
@@ -846,20 +879,69 @@ async def list_scenario_sheet(
         by_id = {item.id: item for item in loaded}
         scenarios = [by_id[item_id] for item_id in scenario_ids if item_id in by_id]
 
+    latest_writebacks: dict[uuid.UUID, SheetWritebackStatus] = {}
+    if scenario_ids and user.role in SYNC_STATUS_ROLES:
+        latest_created_at = (
+            select(
+                SheetWritebackEvent.scenario_id.label("scenario_id"),
+                func.max(SheetWritebackEvent.created_at).label("created_at"),
+            )
+            .where(SheetWritebackEvent.scenario_id.in_(scenario_ids))
+            .group_by(SheetWritebackEvent.scenario_id)
+            .subquery()
+        )
+        event_rows = (
+            await session.execute(
+                select(
+                    SheetWritebackEvent.scenario_id,
+                    SheetWritebackEvent.status,
+                ).join(
+                    latest_created_at,
+                    and_(
+                        SheetWritebackEvent.scenario_id
+                        == latest_created_at.c.scenario_id,
+                        SheetWritebackEvent.created_at
+                        == latest_created_at.c.created_at,
+                    ),
+                )
+            )
+        ).all()
+        latest_writebacks = {
+            event.scenario_id: event.status
+            for event in event_rows
+        }
+
     rows = []
     for scenario in scenarios:
         role_view = scenario_for_role(scenario, user)
+        values = values_for_role(role_view, user.role)
+        if user.role in SYNC_STATUS_ROLES:
+            values[SYNC_STATUS_FIELD] = sheet_sync_status_for_scenario(
+                scenario,
+                latest_writebacks.get(scenario.id),
+            )
         rows.append(
             SheetScenarioRow(
                 id=scenario.id,
                 status=scenario.status,
                 version=scenario.updated_at,
-                values=values_for_role(role_view, user.role),
+                values=values,
                 editable_fields=editable_fields_for_role(role_view, user.role),
             )
         )
+    columns = columns_for_role(user.role)
+    if user.role in SYNC_STATUS_ROLES:
+        columns.insert(
+            0,
+            SheetColumnRead(
+                field=SYNC_STATUS_FIELD,
+                label="Google Sheets",
+                group="Синхронизация",
+                editor="readonly",
+            ),
+        )
     return SheetScenarioPage(
-        columns=columns_for_role(user.role),
+        columns=columns,
         items=rows,
         meta=PaginationMeta(
             page=page,
@@ -873,9 +955,11 @@ async def list_scenario_sheet(
 def scenario_create_writeback(
     payload: ScenarioCreate,
     external_id: str,
+    assigned_scenarist_id: uuid.UUID,
 ) -> dict[str, object]:
     values: dict[str, object | None] = {
         "external_id": external_id,
+        "assigned_scenarist_id": assigned_scenarist_id,
         "scenario_date": payload.scenario_date,
         "deadline": payload.deadline,
         "score": payload.score,
@@ -904,6 +988,95 @@ def scenario_create_writeback(
     }
 
 
+def loaded_scenario_writeback(scenario: Scenario) -> dict[str, object]:
+    approvals = {
+        item.stage.value: item
+        for item in getattr(scenario, "approvals", ())
+    }
+    values: dict[str, object] = {}
+    for item in SHEET_FIELDS:
+        if item.field.startswith("approval."):
+            _, stage, attribute = item.field.split(".")
+            value = getattr(approvals.get(stage), attribute, None)
+        else:
+            value: object | None = scenario
+            for part in item.field.split("."):
+                value = getattr(value, part, None)
+                if value is None:
+                    break
+        if hasattr(value, "value"):
+            value = value.value
+        if value is not None:
+            values[item.field] = value
+    return values
+
+
+async def exact_sheet_source_for_assignment(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    assigned_scenarist_id: uuid.UUID,
+) -> SheetSource:
+    sources = list(
+        (
+            await session.scalars(
+                select(SheetSource)
+                .where(
+                    SheetSource.project_id == project_id,
+                    SheetSource.assigned_scenarist_id == assigned_scenarist_id,
+                    SheetSource.enabled.is_(True),
+                )
+                .order_by(SheetSource.created_at)
+            )
+        ).all()
+    )
+    return require_exact_sheet_source(sources)
+
+
+async def assign_scenarist_without_moving_sheet_row(
+    session: AsyncSession,
+    scenario: Scenario,
+    assigned_scenarist_id: uuid.UUID | None,
+) -> bool:
+    if assigned_scenarist_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="assigned_scenarist_id is required for scenario manager",
+        )
+    assigned_scenarist_id = require_assignable_scenarist(
+        await session.get(User, assigned_scenarist_id)
+    ).id
+    if scenario.sheet_source_id is not None:
+        source = await session.get(SheetSource, scenario.sheet_source_id)
+        if source is None or not source.enabled:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The scenario Google Sheets source is missing or disabled",
+            )
+        if source.assigned_scenarist_id != assigned_scenarist_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Cannot reassign a Google Sheets row to a scenarist "
+                    "connected to another sheet"
+                ),
+            )
+        scenario.assigned_scenarist_id = assigned_scenarist_id
+        return False
+
+    source = await exact_sheet_source_for_assignment(
+        session,
+        scenario.project_id,
+        assigned_scenarist_id,
+    )
+    scenario.assigned_scenarist_id = assigned_scenarist_id
+    scenario.sheet_source_id = source.id
+    scenario.crm_row_id = scenario.crm_row_id or uuid.uuid4()
+    scenario.source_sheet_id = source.spreadsheet_id
+    scenario.source_tab = source.source_tab
+    scenario.source_row = None
+    return True
+
+
 @router.post("", response_model=ScenarioRead, status_code=status.HTTP_201_CREATED)
 async def create_scenario(
     payload: ScenarioCreate,
@@ -925,40 +1098,20 @@ async def create_scenario(
         payload.assigned_scenarist_id,
         requested_scenarist,
     )
-    sheet_sources = list(
-        (
-            await session.scalars(
-                select(SheetSource)
-                .where(
-                    SheetSource.project_id == payload.project_id,
-                    SheetSource.enabled.is_(True),
-                )
-                .order_by(SheetSource.created_at)
-            )
-        ).all()
-    )
-    exact_sources = [
-        source
-        for source in sheet_sources
-        if source.assigned_scenarist_id == assigned_scenarist_id
-    ]
-    sheet_source = (
-        exact_sources[0]
-        if len(exact_sources) == 1
-        else sheet_sources[0]
-        if len(sheet_sources) == 1
-        else None
+    sheet_source = await exact_sheet_source_for_assignment(
+        session,
+        payload.project_id,
+        assigned_scenarist_id,
     )
 
     data = payload.model_dump(exclude={"research", "content"})
     data["assigned_scenarist_id"] = assigned_scenarist_id
-    if sheet_source is not None:
-        data.update(
-            sheet_source_id=sheet_source.id,
-            crm_row_id=uuid.uuid4(),
-            source_sheet_id=sheet_source.spreadsheet_id,
-            source_tab=sheet_source.source_tab,
-        )
+    data.update(
+        sheet_source_id=sheet_source.id,
+        crm_row_id=uuid.uuid4(),
+        source_sheet_id=sheet_source.spreadsheet_id,
+        source_tab=sheet_source.source_tab,
+    )
     if session.get_bind().dialect.name != "postgresql":
         existing_ids = await session.scalars(select(Scenario.external_id))
         numeric_ids = [
@@ -976,7 +1129,11 @@ async def create_scenario(
         await enqueue_sheet_writeback(
             session,
             scenario,
-            scenario_create_writeback(payload, scenario.external_id),
+            scenario_create_writeback(
+                payload,
+                scenario.external_id,
+                assigned_scenarist_id,
+            ),
         )
         await session.commit()
     except IntegrityError as error:
@@ -1180,12 +1337,15 @@ async def patch_scenario_sheet_row(
     ready_material_changed = False
     publisher_status_changed = False
     publication_content_changed = False
+    sheet_source_bound = False
     for change in regular_changes:
         value = coerce_sheet_value(change.field, change.value)
         if change.field == "assigned_scenarist_id":
-            if value is not None:
-                value = require_assignable_scenarist(await session.get(User, value)).id
-            scenario.assigned_scenarist_id = value
+            sheet_source_bound = await assign_scenarist_without_moving_sheet_row(
+                session,
+                scenario,
+                value,
+            )
             continue
         if "." not in change.field:
             setattr(scenario, change.field, value)
@@ -1497,7 +1657,11 @@ async def patch_scenario_sheet_row(
             scenario.status = status_after_unpublishing(scenario)
 
     scenario.updated_at = datetime.now(UTC)
-    writeback_changes = {change.field: change.value for change in payload.changes}
+    writeback_changes = (
+        loaded_scenario_writeback(scenario)
+        if sheet_source_bound
+        else {change.field: change.value for change in payload.changes}
+    )
     if source_material_changed:
         writeback_changes["montage.material_status"] = SourceMaterialStatus.DRAFT.value
     source_decision = approval_changes.get(ApprovalStage.SOURCE_MATERIAL, {}).get(
@@ -1562,6 +1726,7 @@ async def update_scenario(
 
     changes = payload.model_dump(exclude_unset=True, exclude={"research", "content"})
     writeback_changes = dict(changes)
+    sheet_source_bound = False
     if "assigned_scenarist_id" in changes:
         if user.role != Role.MANAGER:
             raise HTTPException(
@@ -1569,12 +1734,11 @@ async def update_scenario(
                 detail="Only manager can reassign a scenarist",
             )
         requested_scenarist_id = changes.pop("assigned_scenarist_id")
-        if requested_scenarist_id is None:
-            scenario.assigned_scenarist_id = None
-        else:
-            scenario.assigned_scenarist_id = require_assignable_scenarist(
-                await session.get(User, requested_scenarist_id)
-            ).id
+        sheet_source_bound = await assign_scenarist_without_moving_sheet_row(
+            session,
+            scenario,
+            requested_scenarist_id,
+        )
     for key, value in changes.items():
         setattr(scenario, key, value)
 
@@ -1599,6 +1763,8 @@ async def update_scenario(
         if scenario.status != ScenarioStatus.REVISION:
             scenario.status = ScenarioStatus.DRAFT
 
+    if sheet_source_bound:
+        writeback_changes = loaded_scenario_writeback(scenario)
     scenario.updated_at = datetime.now(UTC)
     await enqueue_sheet_writeback(session, scenario, writeback_changes)
     await session.commit()

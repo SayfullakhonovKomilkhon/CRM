@@ -15,6 +15,7 @@ from crm.main import app
 from crm.models import (
     ApprovalDecision,
     ApprovalStage,
+    Role,
     Scenario,
     ScenarioStatus,
     SheetSource,
@@ -294,6 +295,7 @@ def test_new_sheet_row_places_fields_and_identity_in_sparse_columns():
 
 
 def test_create_writeback_is_built_from_payload_without_lazy_relationship_reads():
+    assigned_scenarist_id = uuid.uuid4()
     payload = ScenarioCreate(
         project_id=uuid.uuid4(),
         scenario_type="Экспертный",
@@ -303,13 +305,84 @@ def test_create_writeback_is_built_from_payload_without_lazy_relationship_reads(
         },
     )
 
-    values = scenario_routes.scenario_create_writeback(payload, "124")
+    values = scenario_routes.scenario_create_writeback(
+        payload,
+        "124",
+        assigned_scenarist_id,
+    )
 
     assert values["external_id"] == "124"
+    assert values["assigned_scenarist_id"] == assigned_scenarist_id
     assert values["scenario_type"] == "Экспертный"
     assert values["content.cover_text"] == "Новая строка"
     assert values["content.script_text"] == "Полный текст"
     assert "deadline" not in values
+
+
+@pytest.mark.parametrize(
+    ("sheet_source_id", "source_row", "event_status", "expected"),
+    [
+        (None, None, None, "not_configured"),
+        (uuid.uuid4(), None, None, "waiting"),
+        (uuid.uuid4(), None, SheetWritebackStatus.PENDING, "syncing"),
+        (uuid.uuid4(), None, SheetWritebackStatus.PROCESSING, "syncing"),
+        (uuid.uuid4(), None, SheetWritebackStatus.FAILED, "error"),
+        (uuid.uuid4(), None, SheetWritebackStatus.COMPLETED, "synced"),
+        (uuid.uuid4(), 128, None, "synced"),
+    ],
+)
+def test_sheet_sync_status_is_visible_per_scenario(
+    sheet_source_id,
+    source_row,
+    event_status,
+    expected,
+):
+    scenario = SimpleNamespace(
+        sheet_source_id=sheet_source_id,
+        source_row=source_row,
+    )
+    assert (
+        scenario_routes.sheet_sync_status_for_scenario(scenario, event_status)
+        == expected
+    )
+
+
+async def test_sheet_bound_scenario_cannot_be_reassigned_to_another_sheet():
+    source_id = uuid.uuid4()
+    current_scenarist_id = uuid.uuid4()
+    requested_scenarist_id = uuid.uuid4()
+    scenario = SimpleNamespace(
+        sheet_source_id=source_id,
+        project_id=uuid.uuid4(),
+        assigned_scenarist_id=current_scenarist_id,
+    )
+    requested_scenarist = SimpleNamespace(
+        id=requested_scenarist_id,
+        role=Role.SCENARIST,
+        is_active=True,
+    )
+    source = SimpleNamespace(
+        id=source_id,
+        enabled=True,
+        assigned_scenarist_id=current_scenarist_id,
+    )
+
+    class AssignmentSession:
+        async def get(self, model, _identifier):
+            if model is SheetSource:
+                return source
+            return requested_scenarist
+
+    with pytest.raises(HTTPException) as error:
+        await scenario_routes.assign_scenarist_without_moving_sheet_row(
+            AssignmentSession(),
+            scenario,
+            requested_scenarist_id,
+        )
+
+    assert error.value.status_code == 409
+    assert "another sheet" in error.value.detail
+    assert scenario.assigned_scenarist_id == current_scenarist_id
 
 
 class FakeSession:
