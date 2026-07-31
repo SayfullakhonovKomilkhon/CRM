@@ -211,6 +211,18 @@ def test_approved_source_is_handed_to_assigned_editor() -> None:
     assert next_status == ScenarioStatus.HANDED_TO_EDITOR
 
 
+def test_source_can_be_approved_before_editor_assignment() -> None:
+    value = scenario(editor_id=None)
+
+    next_status = status_after_decision(
+        value,
+        ApprovalStage.SOURCE_MATERIAL,
+        ApprovalDecision.APPROVED,
+    )
+
+    assert next_status == ScenarioStatus.SENT_TO_GENERATION
+
+
 def test_montage_revision_returns_work_to_editor() -> None:
     value = scenario()
 

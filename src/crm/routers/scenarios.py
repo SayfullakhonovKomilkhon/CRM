@@ -198,20 +198,6 @@ def require_approval_comment(
         )
 
 
-def require_source_editor_assignment(
-    scenario: Scenario, stage: ApprovalStage, decision: ApprovalDecision
-) -> None:
-    if (
-        stage == ApprovalStage.SOURCE_MATERIAL
-        and decision == ApprovalDecision.APPROVED
-        and (scenario.montage is None or scenario.montage.assigned_editor_id is None)
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Assign an editor before approving source material",
-        )
-
-
 def source_material_status_after_decision(
     decision: ApprovalDecision,
 ) -> SourceMaterialStatus:
@@ -1470,7 +1456,6 @@ async def patch_scenario_sheet_row(
                 ) from error
             require_stage_prerequisites(scenario, stage)
             require_approval_comment(stage, decision, approval.comment)
-            require_source_editor_assignment(scenario, stage, decision)
             approval.decision = decision
             approval.decided_by_id = None if decision == ApprovalDecision.PENDING else user.id
             approval.decided_at = (
@@ -1988,7 +1973,6 @@ async def set_approval(
     require_stage_role(user.role, stage)
     require_stage_prerequisites(scenario, stage)
     require_approval_comment(stage, payload.decision, payload.comment)
-    require_source_editor_assignment(scenario, stage, payload.decision)
     if (
         "note" in payload.model_fields_set
         and stage != ApprovalStage.PRE_GENERATION_CLIENT
