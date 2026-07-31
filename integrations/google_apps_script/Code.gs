@@ -107,6 +107,7 @@ const CRM_SUBMISSION_HEADER = "Отправка на согласование";
 const CRM_SUBMISSION_READY_VALUE = "Отправить";
 const CRM_SOURCE_SUBMISSION_HEADER = "Отправить материал";
 const CRM_PUBLICATION_SUBMISSION_HEADER = "Статус подготовки публикации";
+const CRM_PUBLISHED_HEADER = "Опубликовано";
 const CRM_LIVE_SOURCE_FIELDS = new Set([
   "montage.source_material_url",
   "montage.client_brand_style",
@@ -145,6 +146,11 @@ const CRM_LIVE_FIELDS = new Set([
 
 function installCrmSync() {
   const spreadsheet = SpreadsheetApp.getActive();
+  const props = PropertiesService.getScriptProperties();
+  const sourceTab = props.getProperty("CRM_SOURCE_TAB");
+  const sheet = sourceTab ? spreadsheet.getSheetByName(sourceTab) : null;
+  const headerRow = Number(props.getProperty("CRM_HEADER_ROW") || "1");
+  if (sheet) ensurePublishedCheckboxes_(sheet, headerRow, headerRow + 1, sheet.getMaxRows());
   ScriptApp.getProjectTriggers()
     .filter((trigger) => ["onCrmEdit", CRM_RECONCILE_HANDLER]
       .includes(trigger.getHandlerFunction()))
@@ -246,6 +252,7 @@ function reconcileCrmRows() {
     if (cursor <= headerRow || cursor > lastRow) cursor = headerRow + 1;
     const endRow = Math.min(lastRow, cursor + batchSize - 1);
     const claimedRowIds = {};
+    ensurePublishedCheckboxes_(sheet, headerRow, cursor, endRow);
 
     for (let rowNumber = cursor; rowNumber <= endRow; rowNumber += 1) {
       try {
@@ -439,6 +446,21 @@ function workflowColumn_(sheet, headerRow, props, propertyName, headerName) {
     );
   }
   return matches[0];
+}
+
+function ensurePublishedCheckboxes_(sheet, headerRow, firstRow, lastRow) {
+  if (lastRow < firstRow) return;
+  const headers = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn())
+    .getDisplayValues()[0];
+  const expected = normalizeText_(CRM_PUBLISHED_HEADER);
+  const matches = [];
+  headers.forEach((header, index) => {
+    if (normalizeText_(header) === expected) matches.push(index + 1);
+  });
+  if (matches.length !== 1) return;
+  const rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+  sheet.getRange(firstRow, matches[0], lastRow - firstRow + 1, 1)
+    .setDataValidation(rule);
 }
 
 function withRequiredSourceColumns_(sheet, headerRow, configuredMap) {

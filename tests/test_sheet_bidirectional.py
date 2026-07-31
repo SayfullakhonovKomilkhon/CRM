@@ -171,6 +171,8 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert '"62": "publication.description_instagram"' in script
     assert "CRM_PUBLICATION_AUTO_SUBMIT_FIELDS" in script
     assert "rowHasPublicationReadyContent_" in script
+    assert "ensurePublishedCheckboxes_" in script
+    assert "requireCheckbox()" in script
     assert "canonicalLayout ? CRM_CANONICAL_INBOUND_COLUMN_MAP : {}" in script
     assert '"external_id"' in script
     assert '"content.script_text"' in script
