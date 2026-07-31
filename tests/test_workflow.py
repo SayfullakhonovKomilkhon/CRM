@@ -168,6 +168,30 @@ def test_client_review_requires_responsible_manager_approval() -> None:
     assert stage_prerequisites_met(value, ApprovalStage.PRE_GENERATION_CLIENT) is True
 
 
+def test_submitted_partial_row_can_be_reviewed_and_returned_by_manager() -> None:
+    value = scenario(script_text=None)
+
+    assert stage_prerequisites_met(
+        value, ApprovalStage.RESPONSIBLE_REVIEW
+    ) is True
+
+    value.status = ScenarioStatus.DRAFT
+    assert stage_prerequisites_met(
+        value, ApprovalStage.RESPONSIBLE_REVIEW
+    ) is False
+
+
+def test_client_review_accepts_manager_approved_partial_row() -> None:
+    value = scenario(
+        script_text=None,
+        approvals=[approval(ApprovalStage.RESPONSIBLE_REVIEW)],
+    )
+
+    assert stage_prerequisites_met(
+        value, ApprovalStage.PRE_GENERATION_CLIENT
+    ) is True
+
+
 def test_editor_queue_excludes_generation_and_includes_active_editing() -> None:
     assert ScenarioStatus.SENT_TO_GENERATION not in EDITOR_VISIBLE_STATUSES
     assert ScenarioStatus.HANDED_TO_EDITOR in EDITOR_VISIBLE_STATUSES

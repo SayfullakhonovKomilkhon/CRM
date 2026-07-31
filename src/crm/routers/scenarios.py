@@ -1893,12 +1893,6 @@ async def submit_scenario_for_review(
             status_code=status.HTTP_409_CONFLICT,
             detail="Scenario is not waiting for scenarist submission",
         )
-    if not scenario.content or not (scenario.content.script_text or "").strip():
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Script text is required before submission",
-        )
-
     submit_for_responsible_review(scenario)
     scenario.updated_at = datetime.now(UTC)
     await enqueue_sheet_writeback(

@@ -136,13 +136,13 @@ def require_stage_role(role: Role, stage: ApprovalStage) -> None:
 
 def stage_prerequisites_met(scenario: Scenario, stage: ApprovalStage) -> bool:
     if stage == ApprovalStage.RESPONSIBLE_REVIEW:
-        return bool(scenario.content and scenario.content.script_text)
+        # Explicit submission is the only gate for the scenario manager.
+        # Scenarist sheets may intentionally submit partially filled rows, so
+        # requiring script_text here creates a deadlock: the scenarist is
+        # locked after submission while the manager cannot request revisions.
+        return scenario.status == ScenarioStatus.IN_REVIEW
     if stage == ApprovalStage.PRE_GENERATION_CLIENT:
-        return bool(
-            scenario.content
-            and scenario.content.script_text
-            and is_approved(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
-        )
+        return is_approved(scenario, ApprovalStage.RESPONSIBLE_REVIEW)
     if stage == ApprovalStage.SOURCE_MATERIAL:
         return bool(
             is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
@@ -175,7 +175,9 @@ def require_stage_prerequisites(scenario: Scenario, stage: ApprovalStage) -> Non
     if stage_prerequisites_met(scenario, stage):
         return
     messages = {
-        ApprovalStage.RESPONSIBLE_REVIEW: "Script text is required before responsible review",
+        ApprovalStage.RESPONSIBLE_REVIEW: (
+            "The scenarist must submit the row before responsible review"
+        ),
         ApprovalStage.PRE_GENERATION_CLIENT: (
             "Responsible manager approval is required before client review"
         ),
