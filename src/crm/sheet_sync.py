@@ -31,6 +31,7 @@ from crm.google_sheets import (
 from crm.models import (
     ApprovalDecision,
     ApprovalStage,
+    MontageTask,
     Scenario,
     ScenarioContent,
     ScenarioResearch,
@@ -40,6 +41,7 @@ from crm.models import (
     SheetSource,
     SheetWritebackEvent,
     SheetWritebackStatus,
+    SourceMaterialStatus,
 )
 from crm.schemas import ScenarioCreate
 from crm.sheet import SCENARIST_OWNED_FIELD_NAMES, SHEET_FIELDS
@@ -47,7 +49,12 @@ from crm.sheet_mapping import (
     MANAGED_EXTENSION_HEADERS,
     effective_writeback_column_map,
 )
-from crm.workflow import approval_for, submit_for_responsible_review
+from crm.workflow import (
+    approval_for,
+    is_approved,
+    reset_approvals_from,
+    submit_for_responsible_review,
+)
 
 WEBHOOK_SCHEMA_VERSION = 1
 SHEETS_ORIGIN = "sheets"
@@ -68,6 +75,14 @@ CRM_OWNED_WRITEBACK_FIELDS = frozenset(
     WRITEBACK_FIELDS - SCENARIST_OWNED_FIELD_NAMES
 )
 REALTIME_SERVER_CONTROLLED_FIELDS = frozenset({"montage.material_status"})
+LIVE_SCENARIST_SOURCE_FIELDS = frozenset(
+    {
+        "montage.source_material_url",
+        "montage.client_brand_style",
+        "montage.extra_brief",
+        "montage.scenarist_material_comment",
+    }
+)
 
 
 def source_webhook_secret(settings: Settings, source: SheetSource) -> str:
@@ -385,11 +400,9 @@ async def process_inbound_event(
         event.processed_at = datetime.now(UTC)
         return event
     submit_requested = submission_requested(event.raw.get("submission_status"))
-    if not submit_requested:
-        event.status = SheetEventStatus.SKIPPED
-        event.error = "Sheet row is not marked 'Отправить' for approval"
-        event.processed_at = datetime.now(UTC)
-        return event
+    live_source_requested = (
+        event.raw.get("sync_mode") == "scenarist_live_update"
+    )
     configured_inbound_fields = set(source.inbound_column_map)
     if "external_id" in (getattr(source, "writeback_column_map", None) or {}):
         configured_inbound_fields.add("external_id")
@@ -428,6 +441,18 @@ async def process_inbound_event(
         )
         .with_for_update()
     )
+    live_source_update = bool(
+        not submit_requested
+        and live_source_requested
+        and scenario is not None
+        and inbound_fields
+        and set(inbound_fields) <= LIVE_SCENARIST_SOURCE_FIELDS
+    )
+    if not submit_requested and not live_source_update:
+        event.status = SheetEventStatus.SKIPPED
+        event.error = "Sheet row is not marked 'Отправить' for approval"
+        event.processed_at = datetime.now(UTC)
+        return event
     incoming_external_id = inbound_fields.get("external_id")
     if scenario is None and incoming_external_id is None:
         event.status = SheetEventStatus.FAILED
@@ -441,6 +466,7 @@ async def process_inbound_event(
     if (
         scenario is not None
         and not inbound_update_allowed(scenario)
+        and not live_source_update
         and not workflow_fields_only(inbound_fields)
     ):
         event.status = SheetEventStatus.FAILED
@@ -464,7 +490,28 @@ async def process_inbound_event(
         scenario.source_row = event.row_number
         scenario.source_checksum = event.checksum
     try:
+        previous_live_values = {
+            field_name: (
+                getattr(scenario.montage, field_name.split(".", 1)[1])
+                if scenario.montage is not None
+                else None
+            )
+            for field_name in inbound_fields
+            if field_name in LIVE_SCENARIST_SOURCE_FIELDS
+        }
         _set_values(scenario, inbound_fields)
+        if live_source_update:
+            source_changed = any(
+                getattr(scenario.montage, field_name.split(".", 1)[1])
+                != previous_value
+                for field_name, previous_value in previous_live_values.items()
+            )
+            if source_changed:
+                reset_approvals_from(scenario, ApprovalStage.SOURCE_MATERIAL)
+                scenario.montage = scenario.montage or MontageTask()
+                scenario.montage.material_status = SourceMaterialStatus.DRAFT
+                if is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT):
+                    scenario.status = ScenarioStatus.SENT_TO_GENERATION
         source_payload = dict(scenario.source_payload or {})
         mapped_fields = dict(source_payload.get("mapped_fields") or {})
         mapped_fields.update(inbound_fields)
@@ -473,7 +520,10 @@ async def process_inbound_event(
         if ignored_fields:
             source_payload["last_ignored_sheet_fields"] = ignored_fields
         scenario.source_payload = source_payload
-        if scenario.status in {ScenarioStatus.DRAFT, ScenarioStatus.REVISION}:
+        if submit_requested and scenario.status in {
+            ScenarioStatus.DRAFT,
+            ScenarioStatus.REVISION,
+        }:
             submit_for_responsible_review(scenario)
         await advance_external_id_sequence(session, scenario.external_id)
     except (ValueError, ValidationError) as error:

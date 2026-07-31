@@ -103,6 +103,12 @@ const CRM_CANONICAL_INBOUND_COLUMN_MAP = {
 };
 const CRM_SUBMISSION_HEADER = "Отправка на согласование";
 const CRM_SUBMISSION_READY_VALUE = "Отправить";
+const CRM_LIVE_SOURCE_FIELDS = new Set([
+  "montage.source_material_url",
+  "montage.client_brand_style",
+  "montage.extra_brief",
+  "montage.scenarist_material_comment"
+]);
 
 function installCrmSync() {
   const spreadsheet = SpreadsheetApp.getActive();
@@ -150,7 +156,8 @@ function onCrmEdit(event) {
     syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, {
       force: true,
       a1: event.range.getA1Notation(),
-      submissionColumn
+      submissionColumn,
+      editedColumns
     });
   }
 }
@@ -220,12 +227,20 @@ function reconcileCrmRows() {
 function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, options) {
   const submissionCell = sheet.getRange(rowNumber, options.submissionColumn);
   const submissionStatus = submissionCell.getDisplayValue().trim();
-  if (!isSubmissionRequested_(submissionStatus)) return false;
+  const submissionRequested = isSubmissionRequested_(submissionStatus);
   const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
   const rawRowId = rowIdCell.getDisplayValue().trim();
   const hasExistingIdentity = isUuid_(rawRowId);
+  const liveColumns = new Set(
+    Array.from(options.editedColumns || []).filter(
+      (column) => CRM_LIVE_SOURCE_FIELDS.has(map[column])
+    )
+  );
+  const liveSourceUpdate = !submissionRequested && hasExistingIdentity && liveColumns.size > 0;
+  if (!submissionRequested && !liveSourceUpdate) return false;
   const fields = fullRowFields_(sheet, rowNumber, map, {
-    includeEmptySourceFields: hasExistingIdentity
+    includeEmptySourceFields: hasExistingIdentity,
+    onlyColumns: liveSourceUpdate ? liveColumns : null
   });
 
   let rowId = rawRowId;
@@ -255,7 +270,8 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
       spreadsheet_id: spreadsheetId,
       tab: sheet.getName(),
       a1: options.a1,
-      submission_status: submissionStatus
+      submission_status: submissionStatus,
+      sync_mode: liveSourceUpdate ? "scenarist_live_update" : "submission"
     },
     checksum,
     origin: "sheets",
@@ -276,8 +292,8 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     throw new Error(response.error || "CRM rejected the row");
   }
   props.setProperty(checksumKey, checksum);
-  // Consuming the marker makes every Google -> CRM transfer explicit.
-  submissionCell.clearContent();
+  // Only the explicit review marker is consumed. Live source edits have no marker.
+  if (submissionRequested) submissionCell.clearContent();
   return true;
 }
 
@@ -359,6 +375,7 @@ function fullRowFields_(sheet, rowNumber, map, options) {
   ).getDisplayValues()[0];
   const fields = {};
   columns.forEach((column) => {
+    if (options.onlyColumns && !options.onlyColumns.has(String(column))) return;
     const field = map[String(column)];
     if (!field || !CRM_SCENARIST_INBOUND_FIELDS.has(field)) return;
     const value = values[column - firstColumn];

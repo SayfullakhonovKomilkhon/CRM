@@ -23,6 +23,7 @@ from crm.models import (
     PublisherStatus,
     Role,
     Scenario,
+    ScenarioApproval,
     ScenarioStatus,
     SheetEventStatus,
     SheetSource,
@@ -174,6 +175,9 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert 'newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5)' in script
     assert 'response.status === "failed"' in script
     assert 'const CRM_SUBMISSION_HEADER = "Отправка на согласование"' in script
+    assert 'const CRM_LIVE_SOURCE_FIELDS = new Set([' in script
+    assert 'sync_mode: liveSourceUpdate ? "scenarist_live_update"' in script
+    assert "if (submissionRequested) submissionCell.clearContent()" in script
     assert "isSubmissionRequested_" in script
     assert "submissionCell.clearContent()" in script
     assert "if (!hasExistingIdentity && !hasMeaningfulFields_(fields))" not in script
@@ -252,7 +256,12 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
         async def flush(self):
             return None
 
-    def inbound_event(submission_status, changed_fields=None, row_id=None):
+    def inbound_event(
+        submission_status,
+        changed_fields=None,
+        row_id=None,
+        sync_mode=None,
+    ):
         changed_fields = changed_fields or {}
         return SimpleNamespace(
             id=uuid.uuid4(),
@@ -266,6 +275,7 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
                 "spreadsheet_id": "sheet-1",
                 "tab": "сценарий",
                 "submission_status": submission_status,
+                "sync_mode": sync_mode,
             },
             checksum=canonical_checksum(changed_fields),
             origin="sheets",
@@ -333,6 +343,40 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert skipped_existing.status == SheetEventStatus.SKIPPED
     assert existing.speaker is None
     assert existing.status == ScenarioStatus.DRAFT
+
+    source.inbound_column_map["montage.source_material_url"] = "AK"
+    live_row_id = uuid.uuid4()
+    live_existing = Scenario(
+        project_id=project_id,
+        assigned_scenarist_id=scenarist_id,
+        sheet_source_id=source_id,
+        crm_row_id=live_row_id,
+        source_checksum="live-old",
+        status=ScenarioStatus.SENT_TO_GENERATION,
+    )
+    live_existing.approvals.append(
+        ScenarioApproval(
+            stage=ApprovalStage.PRE_GENERATION_CLIENT,
+            decision=ApprovalDecision.APPROVED,
+        )
+    )
+    live_session = InboundSession(
+        inbound_event(
+            "",
+            {"montage.source_material_url": "https://example.com/source"},
+            live_row_id,
+            "scenarist_live_update",
+        ),
+        live_existing,
+    )
+    live_result = await process_inbound_event(
+        live_session,
+        live_session.event.id,
+    )
+    assert live_result.status == SheetEventStatus.COMPLETED
+    assert live_existing.montage.source_material_url == "https://example.com/source"
+    assert live_existing.montage.material_status.value == "draft"
+    assert live_existing.status == ScenarioStatus.SENT_TO_GENERATION
 
     source.inbound_column_map = {
         "external_id": "B",
