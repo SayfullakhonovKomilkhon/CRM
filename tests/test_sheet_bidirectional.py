@@ -547,6 +547,26 @@ def test_legacy_identity_column_is_never_reused_by_canonical_workflow_field():
     assert mapping["final_revision_gate.decided_at"] == "CT"
 
 
+def test_legacy_publication_extensions_do_not_hide_client_workflow_columns():
+    source = SimpleNamespace(
+        header_row=4,
+        crm_row_id_column="CA",
+        writeback_column_map={
+            "external_id": "B",
+            "content.script_text": "T",
+            "publication.ai_social_descriptions": "BO",
+            "publication.leia_script": "BP",
+        },
+    )
+
+    mapping = effective_writeback_column_map(source)
+
+    assert mapping["approval.pre_generation_client.note"] == "BO"
+    assert mapping["approval.pre_generation_client.decided_at"] == "BP"
+    assert mapping["publication.ai_social_descriptions"] == "CB"
+    assert mapping["publication.leia_script"] == "CC"
+
+
 async def test_canonical_source_writes_crm_owned_role_field_not_in_stored_subset():
     source_id = uuid.uuid4()
     scenario_id = uuid.uuid4()

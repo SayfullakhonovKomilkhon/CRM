@@ -16,6 +16,14 @@ DISPLAY_FIELD_REPLACEMENTS = {
     "montage.assigned_editor_id": "montage.assigned_editor_name",
     "publication.assigned_publisher_id": "publication.assigned_publisher_name",
 }
+LEGACY_CANONICAL_COLUMN_REHOMES = {
+    # Early production sources placed these publication extensions into BO/BP.
+    # Those columns now belong to the client's note and decision date. Drop only
+    # the known legacy placements so the canonical defaults can safely restore
+    # all four fields without overwriting one another.
+    "publication.ai_social_descriptions": ("BO", "CB"),
+    "publication.leia_script": ("BP", "CC"),
+}
 
 CANONICAL_WRITEBACK_COLUMN_MAP: dict[str, str] = {
     "scenario_date": "A",
@@ -175,6 +183,12 @@ def effective_writeback_column_map(source: Any) -> dict[str, int | str]:
         # The legacy template used one editor cell. Keep AO for the assigned
         # employee name and preserve an external editor separately in BQ.
         configured.pop("montage.external_editor_name")
+    if use_canonical_layout:
+        for field, (legacy_column, canonical_column) in (
+            LEGACY_CANONICAL_COLUMN_REHOMES.items()
+        ):
+            if _column_letters(configured.get(field)) == legacy_column:
+                configured[field] = canonical_column
     if not use_canonical_layout:
         return _protect_runtime_identity_column(source, configured)
     configured_columns = {
