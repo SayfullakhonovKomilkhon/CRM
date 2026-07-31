@@ -356,6 +356,23 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert existing.status == ScenarioStatus.DRAFT
 
     source.inbound_column_map["montage.source_material_url"] = "AK"
+    premature_source_session = InboundSession(
+        inbound_event(
+            "",
+            {"montage.source_material_url": "https://example.com/too-early"},
+            existing_row_id,
+            "scenarist_live_update",
+        ),
+        existing,
+    )
+    premature_source_result = await process_inbound_event(
+        premature_source_session,
+        premature_source_session.event.id,
+    )
+    assert premature_source_result.status == SheetEventStatus.FAILED
+    assert "client must approve" in premature_source_result.error
+    assert existing.montage is None
+
     live_row_id = uuid.uuid4()
     live_existing = Scenario(
         project_id=project_id,
