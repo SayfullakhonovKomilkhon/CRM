@@ -229,9 +229,10 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     )
 
     class InboundSession:
-        def __init__(self, event, existing=None):
+        def __init__(self, event, existing=None, legacy_existing=None):
             self.event = event
             self.existing = existing
+            self.legacy_existing = legacy_existing
             self.scalar_calls = 0
             self.added = []
 
@@ -241,6 +242,8 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
                 return self.event
             if self.scalar_calls == 2:
                 return self.existing
+            if self.scalar_calls == 3:
+                return self.legacy_existing
             return None
 
         async def get(self, model, _identifier):
@@ -377,6 +380,42 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert live_existing.montage.source_material_url == "https://example.com/source"
     assert live_existing.montage.material_status.value == "draft"
     assert live_existing.status == ScenarioStatus.SENT_TO_GENERATION
+
+    legacy_row_id = uuid.uuid4()
+    legacy_existing = Scenario(
+        project_id=project_id,
+        assigned_scenarist_id=scenarist_id,
+        sheet_source_id=source_id,
+        crm_row_id=None,
+        source_row=5,
+        source_checksum="legacy-old",
+        status=ScenarioStatus.SENT_TO_GENERATION,
+    )
+    legacy_existing.approvals.append(
+        ScenarioApproval(
+            stage=ApprovalStage.PRE_GENERATION_CLIENT,
+            decision=ApprovalDecision.APPROVED,
+        )
+    )
+    legacy_session = InboundSession(
+        inbound_event(
+            "",
+            {"montage.source_material_url": "https://example.com/legacy-source"},
+            legacy_row_id,
+            "scenarist_live_update",
+        ),
+        legacy_existing=legacy_existing,
+    )
+    legacy_result = await process_inbound_event(
+        legacy_session,
+        legacy_session.event.id,
+    )
+    assert legacy_result.status == SheetEventStatus.COMPLETED
+    assert legacy_existing.crm_row_id == legacy_row_id
+    assert (
+        legacy_existing.montage.source_material_url
+        == "https://example.com/legacy-source"
+    )
 
     source.inbound_column_map = {
         "external_id": "B",
