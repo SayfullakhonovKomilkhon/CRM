@@ -103,11 +103,34 @@ const CRM_CANONICAL_INBOUND_COLUMN_MAP = {
 };
 const CRM_SUBMISSION_HEADER = "Отправка на согласование";
 const CRM_SUBMISSION_READY_VALUE = "Отправить";
+const CRM_SOURCE_SUBMISSION_HEADER = "Отправить материал";
+const CRM_PUBLICATION_SUBMISSION_HEADER = "Статус подготовки публикации";
 const CRM_LIVE_SOURCE_FIELDS = new Set([
   "montage.source_material_url",
   "montage.client_brand_style",
   "montage.extra_brief",
+  "montage.scenarist_material_comment",
+  "montage.scenarist_revision_status",
+  "montage.scenarist_revision_comment"
+]);
+const CRM_SOURCE_CONTENT_FIELDS = new Set([
+  "montage.source_material_url",
+  "montage.client_brand_style",
+  "montage.extra_brief",
   "montage.scenarist_material_comment"
+]);
+const CRM_LIVE_PUBLICATION_FIELDS = new Set([
+  "publication.publisher_brief",
+  "publication.description_dzen",
+  "publication.description_youtube",
+  "publication.description_tiktok",
+  "publication.description_instagram",
+  "publication.ai_social_descriptions",
+  "publication.leia_script"
+]);
+const CRM_LIVE_FIELDS = new Set([
+  ...CRM_LIVE_SOURCE_FIELDS,
+  ...CRM_LIVE_PUBLICATION_FIELDS
 ]);
 
 function installCrmSync() {
@@ -138,13 +161,24 @@ function onCrmEdit(event) {
   );
   const rowIdColumn = columnNumber_(props.getProperty("CRM_ROW_ID_COLUMN") || "A");
   const submissionColumn = submissionColumn_(sheet, headerRow, props);
+  const sourceSubmissionColumn = workflowColumn_(
+    sheet, headerRow, props, "CRM_SOURCE_SUBMISSION_COLUMN", CRM_SOURCE_SUBMISSION_HEADER
+  );
+  const publicationSubmissionColumn = workflowColumn_(
+    sheet, headerRow, props, "CRM_PUBLICATION_SUBMISSION_COLUMN",
+    CRM_PUBLICATION_SUBMISSION_HEADER
+  );
   const firstRow = Math.max(event.range.getRow(), headerRow + 1);
   const lastRow = event.range.getLastRow();
   const editedColumns = new Set(Array.from(
     {length: event.range.getNumColumns()},
     (_, offset) => String(event.range.getColumn() + offset)
   ));
-  const touchesMappedColumn = editedColumns.has(String(submissionColumn)) || Object.keys(map).some(
+  const touchesMappedColumn = [
+    submissionColumn,
+    sourceSubmissionColumn,
+    publicationSubmissionColumn
+  ].some((column) => editedColumns.has(String(column))) || Object.keys(map).some(
     (column) => editedColumns.has(column) && CRM_SCENARIST_INBOUND_FIELDS.has(map[column])
   );
   if (!touchesMappedColumn) return;
@@ -157,6 +191,8 @@ function onCrmEdit(event) {
       force: true,
       a1: event.range.getA1Notation(),
       submissionColumn,
+      sourceSubmissionColumn,
+      publicationSubmissionColumn,
       editedColumns
     });
   }
@@ -185,6 +221,13 @@ function reconcileCrmRows() {
     );
     const rowIdColumn = columnNumber_(props.getProperty("CRM_ROW_ID_COLUMN") || "A");
     const submissionColumn = submissionColumn_(sheet, headerRow, props);
+    const sourceSubmissionColumn = workflowColumn_(
+      sheet, headerRow, props, "CRM_SOURCE_SUBMISSION_COLUMN", CRM_SOURCE_SUBMISSION_HEADER
+    );
+    const publicationSubmissionColumn = workflowColumn_(
+      sheet, headerRow, props, "CRM_PUBLICATION_SUBMISSION_COLUMN",
+      CRM_PUBLICATION_SUBMISSION_HEADER
+    );
     const configuredBatch = Number(
       props.getProperty("CRM_RECONCILE_BATCH_SIZE") || CRM_RECONCILE_DEFAULT_BATCH_SIZE
     );
@@ -207,7 +250,9 @@ function reconcileCrmRows() {
             force: false,
             a1: `${rowNumber}:${rowNumber}`,
             claimedRowIds,
-            submissionColumn
+            submissionColumn,
+            sourceSubmissionColumn,
+            publicationSubmissionColumn
           }
         );
       } catch (error) {
@@ -228,19 +273,48 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
   const submissionCell = sheet.getRange(rowNumber, options.submissionColumn);
   const submissionStatus = submissionCell.getDisplayValue().trim();
   const submissionRequested = isSubmissionRequested_(submissionStatus);
+  const sourceSubmissionCell = sheet.getRange(rowNumber, options.sourceSubmissionColumn);
+  const sourceSubmissionStatus = sourceSubmissionCell.getDisplayValue().trim();
+  const publicationSubmissionCell = sheet.getRange(
+    rowNumber, options.publicationSubmissionColumn
+  );
+  const publicationSubmissionStatus = publicationSubmissionCell.getDisplayValue().trim();
   const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
   const rawRowId = rowIdCell.getDisplayValue().trim();
   const hasExistingIdentity = isUuid_(rawRowId);
   const liveColumns = new Set(
     Array.from(options.editedColumns || []).filter(
-      (column) => CRM_LIVE_SOURCE_FIELDS.has(map[column])
+      (column) => CRM_LIVE_FIELDS.has(map[column])
     )
   );
-  const liveSourceUpdate = !submissionRequested && hasExistingIdentity && liveColumns.size > 0;
-  if (!submissionRequested && !liveSourceUpdate) return false;
+  const isRecoveryScan = !options.editedColumns;
+  const sourceSubmitRequested = !submissionRequested && hasExistingIdentity &&
+    isWorkflowSubmissionRequested_(sourceSubmissionStatus) &&
+    (isRecoveryScan || options.editedColumns.has(String(options.sourceSubmissionColumn)));
+  const publicationSubmitRequested = !submissionRequested && hasExistingIdentity &&
+    isWorkflowSubmissionRequested_(publicationSubmissionStatus) &&
+    (isRecoveryScan || options.editedColumns.has(String(options.publicationSubmissionColumn)));
+  const liveUpdate = !submissionRequested && !sourceSubmitRequested &&
+    !publicationSubmitRequested && hasExistingIdentity && liveColumns.size > 0;
+  if (!submissionRequested && !sourceSubmitRequested &&
+      !publicationSubmitRequested && !liveUpdate) return false;
+  const syncMode = submissionRequested
+    ? "submission"
+    : sourceSubmitRequested
+    ? "source_material_submit"
+    : publicationSubmitRequested
+    ? "publication_submit"
+    : "scenarist_live_update";
+  const selectedColumns = sourceSubmitRequested
+    ? new Set(Object.keys(map).filter((column) => CRM_LIVE_SOURCE_FIELDS.has(map[column])))
+    : publicationSubmitRequested
+    ? new Set(Object.keys(map).filter((column) => CRM_LIVE_PUBLICATION_FIELDS.has(map[column])))
+    : liveUpdate
+    ? liveColumns
+    : null;
   const fields = fullRowFields_(sheet, rowNumber, map, {
     includeEmptySourceFields: hasExistingIdentity,
-    onlyColumns: liveSourceUpdate ? liveColumns : null
+    onlyColumns: selectedColumns
   });
 
   let rowId = rawRowId;
@@ -257,7 +331,7 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
   }
   if (claimed) claimed[rowId] = true;
 
-  const checksum = sha256Hex_(stableJson_(fields));
+  const checksum = sha256Hex_(stableJson_({fields, sync_mode: syncMode}));
   const checksumKey = syncChecksumKey_(sheet.getSheetId(), rowId);
   if (!options.force && props.getProperty(checksumKey) === checksum) return false;
   const payload = {
@@ -271,7 +345,7 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
       tab: sheet.getName(),
       a1: options.a1,
       submission_status: submissionStatus,
-      sync_mode: liveSourceUpdate ? "scenarist_live_update" : "submission"
+      sync_mode: syncMode
     },
     checksum,
     origin: "sheets",
@@ -292,7 +366,17 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     throw new Error(response.error || "CRM rejected the row");
   }
   props.setProperty(checksumKey, checksum);
-  // Only the explicit review marker is consumed. Live source edits have no marker.
+  if (sourceSubmitRequested) sourceSubmissionCell.setValue("ready_for_review");
+  if (publicationSubmitRequested) {
+    publicationSubmissionCell.setValue("ready_for_review");
+  }
+  if (liveUpdate && Array.from(liveColumns).some(
+    (column) => CRM_SOURCE_CONTENT_FIELDS.has(map[column])
+  )) sourceSubmissionCell.setValue("draft");
+  if (liveUpdate && Array.from(liveColumns).some(
+    (column) => CRM_LIVE_PUBLICATION_FIELDS.has(map[column])
+  )) publicationSubmissionCell.setValue("draft");
+  // Only the initial review marker is consumed. Later stages show canonical status.
   if (submissionRequested) submissionCell.clearContent();
   return true;
 }
@@ -312,6 +396,24 @@ function submissionColumn_(sheet, headerRow, props) {
   if (matches.length !== 1) {
     throw new Error(
       `Expected exactly one "${CRM_SUBMISSION_HEADER}" column in row ${headerRow}`
+    );
+  }
+  return matches[0];
+}
+
+function workflowColumn_(sheet, headerRow, props, propertyName, headerName) {
+  const configured = String(props.getProperty(propertyName) || "").trim();
+  if (configured) return columnNumber_(configured);
+  const headers = sheet.getRange(headerRow, 1, 1, sheet.getLastColumn())
+    .getDisplayValues()[0];
+  const expected = normalizeText_(headerName);
+  const matches = [];
+  headers.forEach((header, index) => {
+    if (normalizeText_(header) === expected) matches.push(index + 1);
+  });
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected exactly one "${headerName}" column in row ${headerRow}`
     );
   }
   return matches[0];
@@ -341,6 +443,11 @@ function withRequiredSourceColumns_(sheet, headerRow, configuredMap) {
 
 function isSubmissionRequested_(value) {
   return normalizeText_(value) === normalizeText_(CRM_SUBMISSION_READY_VALUE);
+}
+
+function isWorkflowSubmissionRequested_(value) {
+  const normalized = normalizeText_(value);
+  return ["отправить", "готово", "ready for review"].includes(normalized);
 }
 
 function normalizeText_(value) {

@@ -20,6 +20,9 @@ from crm.main import app
 from crm.models import (
     ApprovalDecision,
     ApprovalStage,
+    Publication,
+    PublicationPreparationStatus,
+    PublicationReviewDecision,
     PublisherStatus,
     Role,
     Scenario,
@@ -176,7 +179,12 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert 'response.status === "failed"' in script
     assert 'const CRM_SUBMISSION_HEADER = "Отправка на согласование"' in script
     assert 'const CRM_LIVE_SOURCE_FIELDS = new Set([' in script
-    assert 'sync_mode: liveSourceUpdate ? "scenarist_live_update"' in script
+    assert 'const CRM_LIVE_PUBLICATION_FIELDS = new Set([' in script
+    assert '"source_material_submit"' in script
+    assert '"publication_submit"' in script
+    assert "sync_mode: syncMode" in script
+    assert 'sourceSubmissionCell.setValue("ready_for_review")' in script
+    assert 'publicationSubmissionCell.setValue("ready_for_review")' in script
     assert "if (submissionRequested) submissionCell.clearContent()" in script
     assert "isSubmissionRequested_" in script
     assert "submissionCell.clearContent()" in script
@@ -380,6 +388,85 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert live_existing.montage.source_material_url == "https://example.com/source"
     assert live_existing.montage.material_status.value == "draft"
     assert live_existing.status == ScenarioStatus.SENT_TO_GENERATION
+
+    source_submit_session = InboundSession(
+        inbound_event(
+            "",
+            {},
+            live_row_id,
+            "source_material_submit",
+        ),
+        live_existing,
+    )
+    source_submit_result = await process_inbound_event(
+        source_submit_session,
+        source_submit_session.event.id,
+    )
+    assert source_submit_result.status == SheetEventStatus.COMPLETED
+    assert live_existing.montage.material_status.value == "ready_for_review"
+
+    source.inbound_column_map["publication.description_youtube"] = "BH"
+    publication_row_id = uuid.uuid4()
+    publication_existing = Scenario(
+        project_id=project_id,
+        assigned_scenarist_id=scenarist_id,
+        sheet_source_id=source_id,
+        crm_row_id=publication_row_id,
+        source_checksum="publication-old",
+        status=ScenarioStatus.APPROVED,
+        publication=Publication(
+            preparation_status=PublicationPreparationStatus.REVISION.value,
+            manager_review_decision=PublicationReviewDecision.REVISION,
+        ),
+    )
+    publication_existing.approvals.append(
+        ScenarioApproval(
+            stage=ApprovalStage.FINAL_CLIENT,
+            decision=ApprovalDecision.APPROVED,
+        )
+    )
+    publication_live_session = InboundSession(
+        inbound_event(
+            "",
+            {"publication.description_youtube": "Описание из Google"},
+            publication_row_id,
+            "scenarist_live_update",
+        ),
+        publication_existing,
+    )
+    publication_live_result = await process_inbound_event(
+        publication_live_session,
+        publication_live_session.event.id,
+    )
+    assert publication_live_result.status == SheetEventStatus.COMPLETED
+    assert publication_existing.publication.description_youtube == "Описание из Google"
+    assert (
+        publication_existing.publication.preparation_status
+        == PublicationPreparationStatus.DRAFT.value
+    )
+    assert (
+        publication_existing.publication.manager_review_decision
+        == PublicationReviewDecision.PENDING
+    )
+
+    publication_submit_session = InboundSession(
+        inbound_event(
+            "",
+            {},
+            publication_row_id,
+            "publication_submit",
+        ),
+        publication_existing,
+    )
+    publication_submit_result = await process_inbound_event(
+        publication_submit_session,
+        publication_submit_session.event.id,
+    )
+    assert publication_submit_result.status == SheetEventStatus.COMPLETED
+    assert (
+        publication_existing.publication.preparation_status
+        == PublicationPreparationStatus.READY_FOR_REVIEW.value
+    )
 
     legacy_row_id = uuid.uuid4()
     legacy_existing = Scenario(

@@ -32,7 +32,12 @@ from crm.models import (
     ApprovalDecision,
     ApprovalStage,
     MontageTask,
+    Publication,
+    PublicationPreparationStatus,
+    PublicationReviewDecision,
+    PublisherStatus,
     Scenario,
+    ScenarioApproval,
     ScenarioContent,
     ScenarioResearch,
     ScenarioStatus,
@@ -53,6 +58,7 @@ from crm.workflow import (
     approval_for,
     is_approved,
     reset_approvals_from,
+    reset_downstream_approvals,
     submit_for_responsible_review,
 )
 
@@ -81,7 +87,31 @@ LIVE_SCENARIST_SOURCE_FIELDS = frozenset(
         "montage.client_brand_style",
         "montage.extra_brief",
         "montage.scenarist_material_comment",
+        "montage.scenarist_revision_status",
+        "montage.scenarist_revision_comment",
     }
+)
+SOURCE_MATERIAL_CONTENT_FIELDS = frozenset(
+    {
+        "montage.source_material_url",
+        "montage.client_brand_style",
+        "montage.extra_brief",
+        "montage.scenarist_material_comment",
+    }
+)
+LIVE_SCENARIST_PUBLICATION_FIELDS = frozenset(
+    {
+        "publication.publisher_brief",
+        "publication.description_dzen",
+        "publication.description_youtube",
+        "publication.description_tiktok",
+        "publication.description_instagram",
+        "publication.ai_social_descriptions",
+        "publication.leia_script",
+    }
+)
+LIVE_SCENARIST_FIELDS = (
+    LIVE_SCENARIST_SOURCE_FIELDS | LIVE_SCENARIST_PUBLICATION_FIELDS
 )
 
 
@@ -369,6 +399,85 @@ def workflow_fields_only(changed_fields: dict[str, Any]) -> bool:
     )
 
 
+def _publication_content_ready(publication: Publication | None) -> bool:
+    return bool(
+        publication
+        and any(
+            (
+                publication.description_dzen,
+                publication.description_youtube,
+                publication.description_tiktok,
+                publication.description_instagram,
+            )
+        )
+    )
+
+
+def _reset_publication_review(publication: Publication) -> None:
+    publication.preparation_status = PublicationPreparationStatus.DRAFT.value
+    publication.manager_review_decision = PublicationReviewDecision.PENDING
+    publication.manager_review_comment = None
+    publication.manager_reviewed_by_id = None
+    publication.manager_reviewed_at = None
+    publication.assigned_publisher_id = None
+    publication.publisher_status = PublisherStatus.PENDING
+    publication.publisher_comment = None
+    publication.is_published = False
+    publication.published_at = None
+
+
+def _submit_source_material_from_sheet(scenario: Scenario) -> None:
+    if not is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT):
+        raise ValueError("The client must approve the scenario first")
+    if scenario.status != ScenarioStatus.SENT_TO_GENERATION:
+        raise ValueError("Source material is not waiting for scenarist submission")
+    scenario.montage = scenario.montage or MontageTask()
+    if scenario.montage.material_status == SourceMaterialStatus.READY_FOR_REVIEW:
+        raise ValueError("Source material has already been submitted")
+    if scenario.montage.material_status == SourceMaterialStatus.REJECTED:
+        raise ValueError("Rejected source material cannot be resubmitted")
+    approval = approval_for(scenario, ApprovalStage.SOURCE_MATERIAL)
+    if approval is not None and approval.decision == ApprovalDecision.APPROVED:
+        raise ValueError("Source material has already been approved")
+    reset_downstream_approvals(scenario, ApprovalStage.SOURCE_MATERIAL)
+    if approval is None:
+        approval = ScenarioApproval(stage=ApprovalStage.SOURCE_MATERIAL)
+        scenario.approvals.append(approval)
+    approval.decision = ApprovalDecision.PENDING
+    approval.decided_by_id = None
+    approval.decided_at = None
+    scenario.montage.material_status = SourceMaterialStatus.READY_FOR_REVIEW
+
+
+def _submit_publication_from_sheet(scenario: Scenario) -> None:
+    if not is_approved(scenario, ApprovalStage.FINAL_CLIENT):
+        raise ValueError("The client must approve the final montage first")
+    if scenario.status != ScenarioStatus.APPROVED:
+        raise ValueError("Publication content is not waiting for scenarist submission")
+    scenario.publication = scenario.publication or Publication()
+    if not _publication_content_ready(scenario.publication):
+        raise ValueError("At least one publication description is required")
+    if (
+        scenario.publication.preparation_status
+        == PublicationPreparationStatus.READY_FOR_REVIEW
+    ):
+        raise ValueError("Publication content has already been submitted")
+    if (
+        scenario.publication.preparation_status
+        == PublicationPreparationStatus.APPROVED
+    ):
+        raise ValueError("Publication content has already been approved")
+    scenario.publication.preparation_status = (
+        PublicationPreparationStatus.READY_FOR_REVIEW.value
+    )
+    scenario.publication.manager_review_decision = PublicationReviewDecision.PENDING
+    scenario.publication.manager_review_comment = None
+    scenario.publication.manager_reviewed_by_id = None
+    scenario.publication.manager_reviewed_at = None
+    scenario.publication.assigned_publisher_id = None
+    scenario.publication.publisher_status = PublisherStatus.PENDING
+
+
 async def process_inbound_event(
     session: AsyncSession,
     event_id: uuid.UUID,
@@ -400,9 +509,10 @@ async def process_inbound_event(
         event.processed_at = datetime.now(UTC)
         return event
     submit_requested = submission_requested(event.raw.get("submission_status"))
-    live_source_requested = (
-        event.raw.get("sync_mode") == "scenarist_live_update"
-    )
+    sync_mode = event.raw.get("sync_mode")
+    live_update_requested = sync_mode == "scenarist_live_update"
+    source_submit_requested = sync_mode == "source_material_submit"
+    publication_submit_requested = sync_mode == "publication_submit"
     configured_inbound_fields = set(source.inbound_column_map)
     if "external_id" in (getattr(source, "writeback_column_map", None) or {}):
         configured_inbound_fields.add("external_id")
@@ -441,13 +551,26 @@ async def process_inbound_event(
         )
         .with_for_update()
     )
-    live_source_payload = bool(
+    live_update_payload = bool(
         not submit_requested
-        and live_source_requested
+        and live_update_requested
         and inbound_fields
+        and set(inbound_fields) <= LIVE_SCENARIST_FIELDS
+    )
+    source_submit_payload = bool(
+        not submit_requested
+        and source_submit_requested
         and set(inbound_fields) <= LIVE_SCENARIST_SOURCE_FIELDS
     )
-    if scenario is None and live_source_payload:
+    publication_submit_payload = bool(
+        not submit_requested
+        and publication_submit_requested
+        and set(inbound_fields) <= LIVE_SCENARIST_PUBLICATION_FIELDS
+    )
+    scenarist_stage_action = bool(
+        live_update_payload or source_submit_payload or publication_submit_payload
+    )
+    if scenario is None and scenarist_stage_action:
         legacy_scenario = await session.scalar(
             select(Scenario)
             .where(
@@ -468,11 +591,10 @@ async def process_inbound_event(
         if legacy_scenario is not None:
             legacy_scenario.crm_row_id = event.crm_row_id
             scenario = legacy_scenario
-    live_source_update = bool(
-        live_source_payload
-        and scenario is not None
-    )
-    if not submit_requested and not live_source_update:
+    live_update = bool(live_update_payload and scenario is not None)
+    source_submit = bool(source_submit_payload and scenario is not None)
+    publication_submit = bool(publication_submit_payload and scenario is not None)
+    if not submit_requested and not (live_update or source_submit or publication_submit):
         event.status = SheetEventStatus.SKIPPED
         event.error = "Sheet row is not marked 'Отправить' for approval"
         event.processed_at = datetime.now(UTC)
@@ -482,7 +604,11 @@ async def process_inbound_event(
         event.status = SheetEventStatus.FAILED
         event.error = "Google Sheet ID is required for a new scenario"
         return event
-    if scenario is not None and scenario.source_checksum == event.checksum:
+    if (
+        scenario is not None
+        and scenario.source_checksum == event.checksum
+        and not (source_submit or publication_submit)
+    ):
         event.status = SheetEventStatus.SKIPPED
         event.error = "Checksum already applied"
         event.processed_at = datetime.now(UTC)
@@ -490,7 +616,7 @@ async def process_inbound_event(
     if (
         scenario is not None
         and not inbound_update_allowed(scenario)
-        and not live_source_update
+        and not (live_update or source_submit or publication_submit)
         and not workflow_fields_only(inbound_fields)
     ):
         event.status = SheetEventStatus.FAILED
@@ -514,21 +640,41 @@ async def process_inbound_event(
         scenario.source_row = event.row_number
         scenario.source_checksum = event.checksum
     try:
-        previous_live_values = {
+        source_fields = set(inbound_fields) & LIVE_SCENARIST_SOURCE_FIELDS
+        publication_fields = (
+            set(inbound_fields) & LIVE_SCENARIST_PUBLICATION_FIELDS
+        )
+        if not submit_requested and source_fields and not is_approved(
+            scenario, ApprovalStage.PRE_GENERATION_CLIENT
+        ):
+            raise ValueError("The client must approve the scenario first")
+        if not submit_requested and publication_fields and not is_approved(
+            scenario, ApprovalStage.FINAL_CLIENT
+        ):
+            raise ValueError("The client must approve the final montage first")
+        previous_source_values = {
             field_name: (
                 getattr(scenario.montage, field_name.split(".", 1)[1])
                 if scenario.montage is not None
                 else None
             )
-            for field_name in inbound_fields
-            if field_name in LIVE_SCENARIST_SOURCE_FIELDS
+            for field_name in source_fields
+        }
+        previous_publication_values = {
+            field_name: (
+                getattr(scenario.publication, field_name.split(".", 1)[1])
+                if scenario.publication is not None
+                else None
+            )
+            for field_name in publication_fields
         }
         _set_values(scenario, inbound_fields)
-        if live_source_update:
+        if live_update:
             source_changed = any(
                 getattr(scenario.montage, field_name.split(".", 1)[1])
                 != previous_value
-                for field_name, previous_value in previous_live_values.items()
+                for field_name, previous_value in previous_source_values.items()
+                if field_name in SOURCE_MATERIAL_CONTENT_FIELDS
             )
             if source_changed:
                 reset_approvals_from(scenario, ApprovalStage.SOURCE_MATERIAL)
@@ -536,6 +682,19 @@ async def process_inbound_event(
                 scenario.montage.material_status = SourceMaterialStatus.DRAFT
                 if is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT):
                     scenario.status = ScenarioStatus.SENT_TO_GENERATION
+            publication_changed = any(
+                getattr(scenario.publication, field_name.split(".", 1)[1])
+                != previous_value
+                for field_name, previous_value in previous_publication_values.items()
+            )
+            if publication_changed:
+                scenario.publication = scenario.publication or Publication()
+                _reset_publication_review(scenario.publication)
+                scenario.status = ScenarioStatus.APPROVED
+        if source_submit:
+            _submit_source_material_from_sheet(scenario)
+        if publication_submit:
+            _submit_publication_from_sheet(scenario)
         source_payload = dict(scenario.source_payload or {})
         mapped_fields = dict(source_payload.get("mapped_fields") or {})
         mapped_fields.update(inbound_fields)
