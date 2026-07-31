@@ -736,6 +736,7 @@ class ScenarioListItem(BaseModel):
     score: int | None
     comments_count: int
     updated_at: datetime
+    review_stage: ApprovalStage | None = None
 
 
 class PaginationMeta(BaseModel):

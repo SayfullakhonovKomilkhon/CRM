@@ -21,6 +21,18 @@ def test_client_id_is_documented_for_list_and_sheet() -> None:
         assert parameters["client_id"]["schema"]["anyOf"][0]["format"] == "uuid"
 
 
+def test_client_review_stage_is_documented_in_lightweight_list() -> None:
+    schema = app.openapi()
+    property_schema = schema["components"]["schemas"]["ScenarioListItem"]["properties"]
+
+    assert "review_stage" in property_schema
+    review_stage = property_schema["review_stage"]
+    assert any(
+        option.get("$ref", "").endswith("/ApprovalStage")
+        for option in review_stage["anyOf"]
+    )
+
+
 def test_client_id_filter_targets_the_project_owner() -> None:
     requested_client_id = uuid.uuid4()
     statement = (

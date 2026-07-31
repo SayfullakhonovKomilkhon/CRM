@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, false, func, or_, select
+from sqlalchemy import and_, case, false, func, literal, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -722,6 +722,20 @@ async def list_scenarios(
         Client.name.label("client_name"),
         User.id.label("scenarist_id"),
         User.full_name.label("scenarist_name"),
+        case(
+            (
+                and_(
+                    Scenario.status == ScenarioStatus.CLIENT_REVIEW,
+                    _approval_approved(ApprovalStage.MONTAGE_COMPLIANCE),
+                ),
+                literal(ApprovalStage.FINAL_CLIENT.value),
+            ),
+            (
+                Scenario.status == ScenarioStatus.CLIENT_REVIEW,
+                literal(ApprovalStage.PRE_GENERATION_CLIENT.value),
+            ),
+            else_=None,
+        ).label("review_stage"),
     )
     query = (
         query.join(Project, Scenario.project_id == Project.id)
@@ -770,6 +784,7 @@ async def list_scenarios(
                 score=row.score,
                 comments_count=row.comments_count,
                 updated_at=row.updated_at,
+                review_stage=row.review_stage,
             )
         )
     return ScenarioPage(
