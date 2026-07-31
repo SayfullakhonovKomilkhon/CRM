@@ -944,6 +944,9 @@ def scenario_create_writeback(
     payload: ScenarioCreate,
     external_id: str,
     scenarist_name: str,
+    *,
+    project_name: str | None = None,
+    client_name: str | None = None,
 ) -> dict[str, object]:
     values: dict[str, object | None] = {
         "external_id": external_id,
@@ -954,6 +957,8 @@ def scenario_create_writeback(
         "scenario_type": payload.scenario_type,
         "visual_format": payload.visual_format,
         "speaker": payload.speaker,
+        "project.name": project_name,
+        "project.client_name": client_name,
     }
     if payload.research:
         values.update(
@@ -1117,7 +1122,13 @@ async def create_scenario(
         await enqueue_sheet_writeback(
             session,
             scenario,
-            full_scenario_writeback(scenario),
+            scenario_create_writeback(
+                payload,
+                scenario.external_id,
+                scenario.assigned_scenarist.full_name,
+                project_name=project.name,
+                client_name=project.client.name,
+            ),
         )
         await session.commit()
     except IntegrityError as error:

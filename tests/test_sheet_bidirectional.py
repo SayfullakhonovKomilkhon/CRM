@@ -820,6 +820,8 @@ def test_create_writeback_is_built_from_payload_without_lazy_relationship_reads(
         payload,
         "124",
         "Тестовый сценарист",
+        project_name="Тестовый проект",
+        client_name="Тестовый клиент",
     )
 
     assert values["external_id"] == "124"
@@ -828,6 +830,8 @@ def test_create_writeback_is_built_from_payload_without_lazy_relationship_reads(
     assert values["scenario_type"] == "Экспертный"
     assert values["content.cover_text"] == "Новая строка"
     assert values["content.script_text"] == "Полный текст"
+    assert values["project.name"] == "Тестовый проект"
+    assert values["project.client_name"] == "Тестовый клиент"
     assert "deadline" not in values
 
 
