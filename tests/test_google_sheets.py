@@ -138,7 +138,7 @@ def test_parse_sheet_values_imports_only_scenarist_owned_fields_and_identity():
     assert row.payload["publication"]["publisher_brief"] == "Текст для публициста"
     assert "approval" not in row.payload
     assert "ready_material_url" not in row.payload["montage"]
-    assert "publication_date" not in row.payload["publication"]
+    assert str(row.payload["publication"]["publication_date"]) == "2026-07-25"
     assert "is_published" not in row.payload["publication"]
     assert row.source_payload["M"]["value"] == str(row_id)
 

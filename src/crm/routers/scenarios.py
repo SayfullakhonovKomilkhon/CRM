@@ -226,6 +226,7 @@ def publication_content_ready(publication: Publication | None) -> bool:
         publication
         and any(
             (
+                getattr(publication, "publication_date", None),
                 publication.description_dzen,
                 publication.description_youtube,
                 publication.description_tiktok,
@@ -1393,6 +1394,7 @@ async def patch_scenario_sheet_row(
             target_name == "publication"
             and change.field in {
                 "publication.publisher_brief",
+                "publication.publication_date",
                 "publication.description_dzen",
                 "publication.description_youtube",
                 "publication.description_tiktok",
@@ -1427,6 +1429,10 @@ async def patch_scenario_sheet_row(
     if publication_content_changed and scenario.publication is not None:
         reset_publication_review(scenario.publication)
         scenario.status = ScenarioStatus.APPROVED
+        if publication_content_ready(scenario.publication):
+            scenario.publication.preparation_status = (
+                PublicationPreparationStatus.READY_FOR_REVIEW.value
+            )
 
     stage_order = [
         ApprovalStage.RESPONSIBLE_REVIEW,
@@ -2291,6 +2297,10 @@ async def update_publication(
     if changed:
         reset_publication_review(scenario.publication)
         scenario.status = ScenarioStatus.APPROVED
+        if publication_content_ready(scenario.publication):
+            scenario.publication.preparation_status = (
+                PublicationPreparationStatus.READY_FOR_REVIEW.value
+            )
     scenario.updated_at = datetime.now(UTC)
     await enqueue_sheet_writeback(
         session,

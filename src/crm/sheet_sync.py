@@ -51,7 +51,9 @@ from crm.models import (
 from crm.schemas import ScenarioCreate
 from crm.sheet import SCENARIST_OWNED_FIELD_NAMES, SHEET_FIELDS
 from crm.sheet_mapping import (
+    CANONICAL_WRITEBACK_COLUMN_MAP,
     MANAGED_EXTENSION_HEADERS,
+    canonical_layout_enabled,
     effective_writeback_column_map,
 )
 from crm.workflow import (
@@ -101,6 +103,7 @@ SOURCE_MATERIAL_CONTENT_FIELDS = frozenset(
 )
 LIVE_SCENARIST_PUBLICATION_FIELDS = frozenset(
     {
+        "publication.publication_date",
         "publication.publisher_brief",
         "publication.description_dzen",
         "publication.description_youtube",
@@ -404,6 +407,7 @@ def _publication_content_ready(publication: Publication | None) -> bool:
         publication
         and any(
             (
+                getattr(publication, "publication_date", None),
                 publication.description_dzen,
                 publication.description_youtube,
                 publication.description_tiktok,
@@ -452,21 +456,21 @@ def _submit_source_material_from_sheet(scenario: Scenario) -> None:
 def _submit_publication_from_sheet(scenario: Scenario) -> None:
     if not is_approved(scenario, ApprovalStage.FINAL_CLIENT):
         raise ValueError("The client must approve the final montage first")
-    if scenario.status != ScenarioStatus.APPROVED:
-        raise ValueError("Publication content is not waiting for scenarist submission")
     scenario.publication = scenario.publication or Publication()
-    if not _publication_content_ready(scenario.publication):
-        raise ValueError("At least one publication description is required")
     if (
         scenario.publication.preparation_status
         == PublicationPreparationStatus.READY_FOR_REVIEW
     ):
-        raise ValueError("Publication content has already been submitted")
+        return
     if (
         scenario.publication.preparation_status
         == PublicationPreparationStatus.APPROVED
     ):
-        raise ValueError("Publication content has already been approved")
+        return
+    if scenario.status != ScenarioStatus.APPROVED:
+        raise ValueError("Publication content is not waiting for scenarist submission")
+    if not _publication_content_ready(scenario.publication):
+        raise ValueError("Publication date or at least one description is required")
     scenario.publication.preparation_status = (
         PublicationPreparationStatus.READY_FOR_REVIEW.value
     )
@@ -514,6 +518,8 @@ async def process_inbound_event(
     source_submit_requested = sync_mode == "source_material_submit"
     publication_submit_requested = sync_mode == "publication_submit"
     configured_inbound_fields = set(source.inbound_column_map)
+    if canonical_layout_enabled(source):
+        configured_inbound_fields.update(CANONICAL_WRITEBACK_COLUMN_MAP)
     if "external_id" in (getattr(source, "writeback_column_map", None) or {}):
         configured_inbound_fields.add("external_id")
     allowed = (
@@ -669,6 +675,11 @@ async def process_inbound_event(
             for field_name in publication_fields
         }
         _set_values(scenario, inbound_fields)
+        publication_changed = any(
+            getattr(scenario.publication, field_name.split(".", 1)[1])
+            != previous_value
+            for field_name, previous_value in previous_publication_values.items()
+        )
         if live_update:
             source_changed = any(
                 getattr(scenario.montage, field_name.split(".", 1)[1])
@@ -682,11 +693,6 @@ async def process_inbound_event(
                 scenario.montage.material_status = SourceMaterialStatus.DRAFT
                 if is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT):
                     scenario.status = ScenarioStatus.SENT_TO_GENERATION
-            publication_changed = any(
-                getattr(scenario.publication, field_name.split(".", 1)[1])
-                != previous_value
-                for field_name, previous_value in previous_publication_values.items()
-            )
             if publication_changed:
                 scenario.publication = scenario.publication or Publication()
                 _reset_publication_review(scenario.publication)
@@ -694,6 +700,10 @@ async def process_inbound_event(
         if source_submit:
             _submit_source_material_from_sheet(scenario)
         if publication_submit:
+            if publication_changed:
+                scenario.publication = scenario.publication or Publication()
+                _reset_publication_review(scenario.publication)
+                scenario.status = ScenarioStatus.APPROVED
             _submit_publication_from_sheet(scenario)
         source_payload = dict(scenario.source_payload or {})
         mapped_fields = dict(source_payload.get("mapped_fields") or {})

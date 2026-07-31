@@ -50,6 +50,7 @@ const CRM_SCENARIST_INBOUND_FIELDS = new Set([
   "montage.scenarist_revision_status",
   "montage.scenarist_revision_comment",
   "publication.publisher_brief",
+  "publication.publication_date",
   "publication.description_dzen",
   "publication.description_youtube",
   "publication.description_tiktok",
@@ -92,11 +93,12 @@ const CRM_CANONICAL_INBOUND_COLUMN_MAP = {
   "44": "montage.scenarist_material_comment",
   "53": "montage.scenarist_revision_status",
   "54": "montage.scenarist_revision_comment",
-  "59": "publication.publisher_brief",
-  "60": "publication.description_dzen",
-  "61": "publication.description_youtube",
-  "62": "publication.description_tiktok",
-  "63": "publication.description_instagram",
+  "57": "publication.publication_date",
+  "58": "publication.publisher_brief",
+  "59": "publication.description_dzen",
+  "60": "publication.description_youtube",
+  "61": "publication.description_tiktok",
+  "62": "publication.description_instagram",
   "80": "publication.ai_social_descriptions",
   "81": "publication.leia_script",
   "96": "score"
@@ -120,6 +122,7 @@ const CRM_SOURCE_CONTENT_FIELDS = new Set([
   "montage.scenarist_material_comment"
 ]);
 const CRM_LIVE_PUBLICATION_FIELDS = new Set([
+  "publication.publication_date",
   "publication.publisher_brief",
   "publication.description_dzen",
   "publication.description_youtube",
@@ -127,6 +130,13 @@ const CRM_LIVE_PUBLICATION_FIELDS = new Set([
   "publication.description_instagram",
   "publication.ai_social_descriptions",
   "publication.leia_script"
+]);
+const CRM_PUBLICATION_AUTO_SUBMIT_FIELDS = new Set([
+  "publication.publication_date",
+  "publication.description_dzen",
+  "publication.description_youtube",
+  "publication.description_tiktok",
+  "publication.description_instagram"
 ]);
 const CRM_LIVE_FIELDS = new Set([
   ...CRM_LIVE_SOURCE_FIELDS,
@@ -288,12 +298,24 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     )
   );
   const isRecoveryScan = !options.editedColumns;
+  const publicationColumns = new Set(
+    Object.keys(map).filter((column) => CRM_LIVE_PUBLICATION_FIELDS.has(map[column]))
+  );
+  const publicationReady = rowHasPublicationReadyContent_(sheet, rowNumber, map);
+  const publicationColumnEdited = !isRecoveryScan &&
+    Array.from(options.editedColumns).some((column) => publicationColumns.has(column));
   const sourceSubmitRequested = !submissionRequested && hasExistingIdentity &&
     isWorkflowSubmissionRequested_(sourceSubmissionStatus) &&
     (isRecoveryScan || options.editedColumns.has(String(options.sourceSubmissionColumn)));
+  const explicitPublicationSubmit = isWorkflowSubmissionRequested_(
+    publicationSubmissionStatus
+  ) && (isRecoveryScan || options.editedColumns.has(
+    String(options.publicationSubmissionColumn)
+  ));
+  const automaticPublicationSubmit = publicationReady &&
+    (isRecoveryScan || publicationColumnEdited);
   const publicationSubmitRequested = !submissionRequested && hasExistingIdentity &&
-    isWorkflowSubmissionRequested_(publicationSubmissionStatus) &&
-    (isRecoveryScan || options.editedColumns.has(String(options.publicationSubmissionColumn)));
+    (explicitPublicationSubmit || automaticPublicationSubmit);
   const liveUpdate = !submissionRequested && !sourceSubmitRequested &&
     !publicationSubmitRequested && hasExistingIdentity && liveColumns.size > 0;
   if (!submissionRequested && !sourceSubmitRequested &&
@@ -490,6 +512,15 @@ function fullRowFields_(sheet, rowNumber, map, options) {
     fields[field] = value === "" ? null : value;
   });
   return fields;
+}
+
+function rowHasPublicationReadyContent_(sheet, rowNumber, map) {
+  const columns = Object.keys(map)
+    .map(Number)
+    .filter((column) => CRM_PUBLICATION_AUTO_SUBMIT_FIELDS.has(map[String(column)]));
+  return columns.some((column) => (
+    sheet.getRange(rowNumber, column).getDisplayValue().trim() !== ""
+  ));
 }
 
 function syncChecksumKey_(sheetId, rowId) {

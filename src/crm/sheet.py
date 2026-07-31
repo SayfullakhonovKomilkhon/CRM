@@ -310,6 +310,7 @@ SHEET_FIELDS = (
         "Дата публикации",
         "Публикация",
         frozenset({Role.CLIENT, Role.MANAGER, Role.SCENARIST}),
+        "inline",
     ),
     field(
         "publication.publisher_brief", "ТЗ для публициста", "Публикация", INTERNAL_ROLES, "detail"
@@ -545,6 +546,7 @@ SCENARIST_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
     "final_revision_gate.decision",
     "final_revision_gate.manager_comment",
     "publication.publisher_brief",
+    "publication.publication_date",
     "publication.manager_review_decision",
     "publication.manager_review_comment",
     "publication.manager_reviewed_at",
@@ -554,7 +556,6 @@ SCENARIST_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
     "publication.description_instagram",
     "publication.ai_social_descriptions",
     "publication.leia_script",
-    "publication.preparation_status",
 }
 
 EDITOR_MANAGER_SHEET_FIELD_NAMES = CORE_SHEET_FIELD_NAMES | {
@@ -732,6 +733,7 @@ SCENARIST_SOURCE_FIELDS = {
     "montage.scenarist_revision_comment",
 }
 SCENARIST_PUBLICATION_FIELDS = {
+    "publication.publication_date",
     "publication.publisher_brief",
     "publication.description_dzen",
     "publication.description_youtube",

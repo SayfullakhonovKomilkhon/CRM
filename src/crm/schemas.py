@@ -609,6 +609,7 @@ class EditorMontageUpdate(BaseModel):
 
 
 class PublicationUpdate(WriteModel):
+    publication_date: date | None = None
     description_dzen: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     description_youtube: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
     description_tiktok: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)

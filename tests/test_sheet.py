@@ -125,7 +125,8 @@ def test_each_internal_role_receives_only_its_workflow_columns() -> None:
 
     assert "research.full_analysis" in scenarist
     assert "montage.source_material_url" in scenarist
-    assert "publication.preparation_status" in scenarist
+    assert "publication.publication_date" in scenarist
+    assert "publication.preparation_status" not in scenarist
     assert "montage.assigned_editor_id" not in scenarist
     assert "montage.price" not in scenarist
     assert "montage.editor_status" not in scenarist

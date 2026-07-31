@@ -167,7 +167,10 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert "One malformed or workflow-locked row must not block rows below it." in script
     assert "const CRM_SCENARIST_INBOUND_FIELDS = new Set([" in script
     assert "const CRM_CANONICAL_INBOUND_COLUMN_MAP = {" in script
-    assert '"63": "publication.description_instagram"' in script
+    assert '"57": "publication.publication_date"' in script
+    assert '"62": "publication.description_instagram"' in script
+    assert "CRM_PUBLICATION_AUTO_SUBMIT_FIELDS" in script
+    assert "rowHasPublicationReadyContent_" in script
     assert "canonicalLayout ? CRM_CANONICAL_INBOUND_COLUMN_MAP : {}" in script
     assert '"external_id"' in script
     assert '"content.script_text"' in script
@@ -482,6 +485,43 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert publication_submit_result.status == SheetEventStatus.COMPLETED
     assert (
         publication_existing.publication.preparation_status
+        == PublicationPreparationStatus.READY_FOR_REVIEW.value
+    )
+
+    source.inbound_column_map["publication.publication_date"] = "BE"
+    date_only_row_id = uuid.uuid4()
+    date_only_existing = Scenario(
+        project_id=project_id,
+        assigned_scenarist_id=scenarist_id,
+        sheet_source_id=source_id,
+        crm_row_id=date_only_row_id,
+        source_checksum="date-only-old",
+        status=ScenarioStatus.APPROVED,
+        publication=Publication(),
+    )
+    date_only_existing.approvals.append(
+        ScenarioApproval(
+            stage=ApprovalStage.FINAL_CLIENT,
+            decision=ApprovalDecision.APPROVED,
+        )
+    )
+    date_only_session = InboundSession(
+        inbound_event(
+            "",
+            {"publication.publication_date": "2026-08-15"},
+            date_only_row_id,
+            "publication_submit",
+        ),
+        date_only_existing,
+    )
+    date_only_result = await process_inbound_event(
+        date_only_session,
+        date_only_session.event.id,
+    )
+    assert date_only_result.status == SheetEventStatus.COMPLETED
+    assert str(date_only_existing.publication.publication_date) == "2026-08-15"
+    assert (
+        date_only_existing.publication.preparation_status
         == PublicationPreparationStatus.READY_FOR_REVIEW.value
     )
 
