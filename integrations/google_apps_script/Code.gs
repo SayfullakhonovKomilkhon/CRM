@@ -331,7 +331,7 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
   }
   if (claimed) claimed[rowId] = true;
 
-  const checksum = sha256Hex_(stableJson_({fields, sync_mode: syncMode}));
+  const checksum = sha256Hex_(stableJson_(fields));
   const checksumKey = syncChecksumKey_(sheet.getSheetId(), rowId);
   if (!options.force && props.getProperty(checksumKey) === checksum) return false;
   const payload = {
