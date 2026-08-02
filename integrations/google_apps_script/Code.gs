@@ -610,17 +610,34 @@ function fullRowFields_(sheet, rowNumber, map, options) {
     const valueIndex = column - firstColumn;
     let value = values[valueIndex];
     const rawValue = rawValues[valueIndex];
-    if (CRM_DATE_FIELDS.has(field) && rawValue instanceof Date) {
-      value = Utilities.formatDate(
+    if (CRM_DATE_FIELDS.has(field)) {
+      value = normalizedSheetDate_(
         rawValue,
-        sheet.getParent().getSpreadsheetTimeZone(),
-        "yyyy-MM-dd"
+        value,
+        sheet.getParent().getSpreadsheetTimeZone()
       );
     }
     if (value === "" && !options.includeEmptySourceFields) return;
     fields[field] = value === "" ? null : value;
   });
   return fields;
+}
+
+function normalizedSheetDate_(rawValue, displayValue, timeZone) {
+  if (rawValue === null || rawValue === "") return displayValue;
+  if (Object.prototype.toString.call(rawValue) === "[object Date]" &&
+      !Number.isNaN(rawValue.getTime())) {
+    return Utilities.formatDate(rawValue, timeZone, "yyyy-MM-dd");
+  }
+  const numericValue = Number(rawValue);
+  if (Number.isFinite(numericValue) && numericValue >= 1) {
+    const utcDate = new Date(Math.round((numericValue - 25569) * 86400000));
+    return Utilities.formatDate(utcDate, "UTC", "yyyy-MM-dd");
+  }
+  return String(displayValue || rawValue)
+    .replace(/[\u00a0\u202f]/g, " ")
+    .replace(/\s*г\.?\s*$/i, "")
+    .trim();
 }
 
 function rowHasPublicationReadyContent_(sheet, rowNumber, map) {

@@ -193,7 +193,9 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert '"approval.responsible_review.decision"' not in script
     assert "!CRM_SCENARIST_INBOUND_FIELDS.has(field)" in script
     assert 'value === "" && !options.includeEmptySourceFields' in script
-    assert "CRM_DATE_FIELDS.has(field) && rawValue instanceof Date" in script
+    assert "normalizedSheetDate_(" in script
+    assert 'Object.prototype.toString.call(rawValue) === "[object Date]"' in script
+    assert "numericValue - 25569" in script
     assert '"yyyy-MM-dd"' in script
     assert 'newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5)' in script
     assert 'response.status === "failed"' in script
