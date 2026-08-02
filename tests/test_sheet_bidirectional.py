@@ -261,10 +261,17 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     )
 
     class InboundSession:
-        def __init__(self, event, existing=None, legacy_existing=None):
+        def __init__(
+            self,
+            event,
+            existing=None,
+            legacy_existing=None,
+            recovered_existing=None,
+        ):
             self.event = event
             self.existing = existing
             self.legacy_existing = legacy_existing
+            self.recovered_existing = recovered_existing
             self.scalar_calls = 0
             self.added = []
 
@@ -276,6 +283,8 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
                 return self.existing
             if self.scalar_calls == 3:
                 return self.legacy_existing
+            if self.scalar_calls == 4:
+                return self.recovered_existing
             return None
 
         async def get(self, model, _identifier):
@@ -429,6 +438,32 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     assert live_existing.montage.source_material_url == "https://example.com/source"
     assert live_existing.montage.material_status.value == "draft"
     assert live_existing.status == ScenarioStatus.SENT_TO_GENERATION
+
+    regenerated_row_id = uuid.uuid4()
+    live_existing.external_id = "20260802901"
+    recovered_session = InboundSession(
+        inbound_event(
+            "",
+            {
+                "external_id": "20260802901",
+                "montage.source_material_url": "https://example.com/recovered-source",
+            },
+            regenerated_row_id,
+            "scenarist_live_update",
+        ),
+        recovered_existing=live_existing,
+    )
+    recovered_result = await process_inbound_event(
+        recovered_session,
+        recovered_session.event.id,
+    )
+    assert recovered_result.status == SheetEventStatus.COMPLETED
+    assert live_existing.crm_row_id == regenerated_row_id
+    assert live_existing.source_row == 5
+    assert (
+        live_existing.montage.source_material_url
+        == "https://example.com/recovered-source"
+    )
 
     source_submit_session = InboundSession(
         inbound_event(

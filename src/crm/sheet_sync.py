@@ -648,21 +648,22 @@ async def process_inbound_event(
         )
         .with_for_update()
     )
+    stage_fields = set(inbound_fields) - {"external_id"}
     live_update_payload = bool(
         not submit_requested
         and live_update_requested
-        and inbound_fields
-        and set(inbound_fields) <= LIVE_SCENARIST_FIELDS
+        and stage_fields
+        and stage_fields <= LIVE_SCENARIST_FIELDS
     )
     source_submit_payload = bool(
         not submit_requested
         and source_submit_requested
-        and set(inbound_fields) <= LIVE_SCENARIST_SOURCE_FIELDS
+        and stage_fields <= LIVE_SCENARIST_SOURCE_FIELDS
     )
     publication_submit_payload = bool(
         not submit_requested
         and publication_submit_requested
-        and set(inbound_fields) <= LIVE_SCENARIST_PUBLICATION_FIELDS
+        and stage_fields <= LIVE_SCENARIST_PUBLICATION_FIELDS
     )
     scenarist_stage_action = bool(
         live_update_payload or source_submit_payload or publication_submit_payload
@@ -688,6 +689,30 @@ async def process_inbound_event(
         if legacy_scenario is not None:
             legacy_scenario.crm_row_id = event.crm_row_id
             scenario = legacy_scenario
+    if scenario is None and scenarist_stage_action:
+        external_id = str(inbound_fields.get("external_id") or "").strip()
+        if external_id:
+            recovered_scenario = await session.scalar(
+                select(Scenario)
+                .where(
+                    Scenario.project_id == source.project_id,
+                    Scenario.external_id == external_id,
+                    Scenario.sheet_source_id == source.id,
+                )
+                .options(
+                    selectinload(Scenario.research),
+                    selectinload(Scenario.content),
+                    selectinload(Scenario.approvals),
+                    selectinload(Scenario.montage),
+                    selectinload(Scenario.publication),
+                    selectinload(Scenario.final_revision_gate),
+                )
+                .with_for_update()
+            )
+            if recovered_scenario is not None:
+                recovered_scenario.crm_row_id = event.crm_row_id
+                recovered_scenario.source_row = event.row_number
+                scenario = recovered_scenario
     live_update = bool(live_update_payload and scenario is not None)
     source_submit = bool(source_submit_payload and scenario is not None)
     publication_submit = bool(publication_submit_payload and scenario is not None)

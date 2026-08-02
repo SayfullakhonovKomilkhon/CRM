@@ -417,6 +417,14 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     : liveUpdate
     ? liveColumns
     : null;
+  // Stage updates normally contain only the edited workflow fields. Include the
+  // visible Sheet ID as a stable recovery hint as well: a copied/restored row
+  // can retain its business ID while its hidden CRM UUID is regenerated.
+  if (selectedColumns) {
+    Object.keys(map).forEach((column) => {
+      if (map[column] === "external_id") selectedColumns.add(column);
+    });
+  }
   ensureRowDateFormats_(sheet, rowNumber, map);
   const fields = fullRowFields_(sheet, rowNumber, map, {
     includeEmptySourceFields: hasExistingIdentity,
