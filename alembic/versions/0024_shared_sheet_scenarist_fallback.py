@@ -9,7 +9,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = "0024_shared_sheet_scenarist_fallback"
+revision = "0024_shared_scenarist_fallback"
 down_revision = "0023_shared_sheet_scenarist"
 branch_labels = None
 depends_on = None
