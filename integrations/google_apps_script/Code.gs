@@ -59,6 +59,12 @@ const CRM_SCENARIST_INBOUND_FIELDS = new Set([
   "publication.ai_social_descriptions",
   "publication.leia_script"
 ]);
+const CRM_DATE_FIELDS = new Set([
+  "scenario_date",
+  "deadline",
+  "montage.ready_at",
+  "publication.publication_date"
+]);
 const CRM_CANONICAL_INBOUND_COLUMN_MAP = {
   "1": "scenario_date",
   "2": "external_id",
@@ -588,18 +594,29 @@ function fullRowFields_(sheet, rowNumber, map, options) {
   if (columns.length === 0) return {};
   const firstColumn = columns[0];
   const lastColumn = columns[columns.length - 1];
-  const values = sheet.getRange(
+  const rowRange = sheet.getRange(
     rowNumber,
     firstColumn,
     1,
     lastColumn - firstColumn + 1
-  ).getDisplayValues()[0];
+  );
+  const values = rowRange.getDisplayValues()[0];
+  const rawValues = rowRange.getValues()[0];
   const fields = {};
   columns.forEach((column) => {
     if (options.onlyColumns && !options.onlyColumns.has(String(column))) return;
     const field = map[String(column)];
     if (!field || !CRM_SCENARIST_INBOUND_FIELDS.has(field)) return;
-    const value = values[column - firstColumn];
+    const valueIndex = column - firstColumn;
+    let value = values[valueIndex];
+    const rawValue = rawValues[valueIndex];
+    if (CRM_DATE_FIELDS.has(field) && rawValue instanceof Date) {
+      value = Utilities.formatDate(
+        rawValue,
+        sheet.getParent().getSpreadsheetTimeZone(),
+        "yyyy-MM-dd"
+      );
+    }
     if (value === "" && !options.includeEmptySourceFields) return;
     fields[field] = value === "" ? null : value;
   });

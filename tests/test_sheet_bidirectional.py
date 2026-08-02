@@ -143,6 +143,16 @@ def test_inbound_values_use_scenario_validation_before_mutation():
     assert value.score is None
 
 
+def test_inbound_coercion_error_identifies_the_source_field():
+    value = Scenario(
+        project_id=uuid.uuid4(),
+        assigned_scenarist_id=uuid.uuid4(),
+    )
+
+    with pytest.raises(ValueError, match="scenario_date: expected date"):
+        _set_values(value, {"scenario_date": "not-a-date"})
+
+
 def test_partial_sheet_row_can_create_and_later_clear_one_field():
     value = Scenario(
         project_id=uuid.uuid4(),
@@ -183,6 +193,8 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert '"approval.responsible_review.decision"' not in script
     assert "!CRM_SCENARIST_INBOUND_FIELDS.has(field)" in script
     assert 'value === "" && !options.includeEmptySourceFields' in script
+    assert "CRM_DATE_FIELDS.has(field) && rawValue instanceof Date" in script
+    assert '"yyyy-MM-dd"' in script
     assert 'newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5)' in script
     assert 'response.status === "failed"' in script
     assert 'const CRM_SUBMISSION_HEADER = "Отправка на согласование"' in script

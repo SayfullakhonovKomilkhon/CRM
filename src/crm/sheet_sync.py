@@ -418,7 +418,10 @@ def _set_values(scenario: Scenario, changed_fields: dict[str, Any]) -> None:
     content_values: dict[str, Any] = {}
     workflow_values: dict[str, Any] = {}
     for field_name, raw_value in changed_fields.items():
-        value = coerce_value(field_name, raw_value)
+        try:
+            value = coerce_value(field_name, raw_value)
+        except ValueError as error:
+            raise ValueError(f"{field_name}: {error}") from error
         if field_name in SCENARIO_FIELDS:
             scenario_values[field_name] = value
         elif field_name.startswith("research."):
