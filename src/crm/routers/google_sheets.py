@@ -61,6 +61,7 @@ from crm.schemas import (
 from crm.sheet_mapping import effective_writeback_column_map
 from crm.sheet_sync import (
     WRITEBACK_FIELDS,
+    bind_unbound_project_scenarios,
     column_letters,
     enqueue_redis,
     process_inbound_event,
@@ -71,18 +72,20 @@ from crm.sheet_sync import (
 )
 
 router = APIRouter(prefix="/google-sheets", tags=["google-sheets"])
+SOURCE_IMPORT_FIELDS = (*SAFE_IMPORT_FIELDS, "scenarist.name")
 
 
 async def _source_targets(
     session: AsyncSession,
     project_id: uuid.UUID,
-    scenarist_id: uuid.UUID,
+    scenarist_id: uuid.UUID | None,
 ) -> None:
     project = await session.scalar(
         select(Project).where(Project.id == project_id).options(selectinload(Project.client))
     )
     require_active_project(project)
-    require_assignable_scenarist(await session.get(User, scenarist_id))
+    if scenarist_id is not None:
+        require_assignable_scenarist(await session.get(User, scenarist_id))
 
 
 def _protect_identity_column(values: dict) -> None:
@@ -140,7 +143,7 @@ async def create_sheet_source(
     values["source_tab"] = values.pop("source_tab").strip()
     values["spreadsheet_id"] = values.pop("spreadsheet_id").strip()
     values["inbound_column_map"] = validate_column_map(
-        values["inbound_column_map"], allowed_fields=SAFE_IMPORT_FIELDS
+        values["inbound_column_map"], allowed_fields=SOURCE_IMPORT_FIELDS
     )
     values["writeback_column_map"] = validate_column_map(
         values["writeback_column_map"], allowed_fields=WRITEBACK_FIELDS
@@ -150,6 +153,8 @@ async def create_sheet_source(
     session.add(source)
     try:
         await session.flush()
+        if source.assigned_scenarist_id is None:
+            await bind_unbound_project_scenarios(session, source)
         secret = source_webhook_secret(settings, source)
         await session.commit()
         await session.refresh(source)
@@ -193,7 +198,7 @@ async def update_sheet_source(
     await _source_targets(session, project_id, scenarist_id)
     if "inbound_column_map" in changes:
         changes["inbound_column_map"] = validate_column_map(
-            changes["inbound_column_map"], allowed_fields=SAFE_IMPORT_FIELDS
+            changes["inbound_column_map"], allowed_fields=SOURCE_IMPORT_FIELDS
         )
     if "writeback_column_map" in changes:
         changes["writeback_column_map"] = validate_column_map(
@@ -283,11 +288,26 @@ async def receive_sheet_webhook(
         now=datetime.now(UTC),
         max_age_seconds=settings.sheet_webhook_max_age_seconds,
     )
-    if not source_metadata_matches(source, payload.raw):
+    if payload.raw.get("spreadsheet_id") != source.spreadsheet_id:
         raise HTTPException(
             status_code=403,
-            detail="Webhook source metadata does not match the registered source",
+            detail="Webhook spreadsheet does not match the registered source",
         )
+    if not source_metadata_matches(source, payload.raw):
+        # One Apps Script installation may serve the legacy main tab and new
+        # project tabs in the same spreadsheet. Authentication still uses the
+        # original URL source; processing is routed to the registered tab.
+        routed_source = await _registered_source(
+            session,
+            source.spreadsheet_id,
+            str(payload.raw.get("tab") or ""),
+        )
+        if routed_source is None:
+            raise HTTPException(
+                status_code=403,
+                detail="Webhook tab is not registered as a CRM source",
+            )
+        source = routed_source
     if canonical_checksum(payload.changed_fields) != payload.checksum.lower():
         raise HTTPException(status_code=422, detail="Webhook checksum mismatch")
     existing = await session.scalar(
@@ -572,6 +592,16 @@ async def _registered_source(
     )
 
 
+def _config_for_registered_source(source: SheetSource) -> GoogleSheetsTabConfig:
+    return GoogleSheetsTabConfig(
+        tab=source.source_tab,
+        header_row=source.header_row,
+        project_id=source.project_id,
+        assigned_scenarist_id=source.assigned_scenarist_id,
+        columns=dict(source.inbound_column_map),
+    )
+
+
 @router.get("/status", response_model=GoogleSheetsStatusRead)
 async def google_sheets_status(
     _: User = Depends(require_roles(Role.ADMIN)),
@@ -585,12 +615,27 @@ async def google_sheets_status(
         .order_by(GoogleSheetsSyncRun.created_at.desc())
         .limit(1)
     )
-    return GoogleSheetsStatusRead(
-        enabled=settings.google_sheets_enabled,
-        ready=not missing,
-        credential_configured=bool(settings.google_service_account_json),
-        spreadsheet_configured=bool(settings.google_sheets_spreadsheet_id),
-        configured_tabs=[
+    registered_sources = list(
+        (
+            await session.scalars(
+                select(SheetSource)
+                .where(SheetSource.enabled.is_(True))
+                .order_by(SheetSource.spreadsheet_id, SheetSource.source_tab)
+            )
+        ).all()
+    )
+    configured_tabs = (
+        [
+            GoogleSheetsTabStatus(
+                tab=source.source_tab,
+                header_row=source.header_row,
+                project_id=source.project_id,
+                assigned_scenarist_id=source.assigned_scenarist_id,
+            )
+            for source in registered_sources
+        ]
+        if registered_sources
+        else [
             GoogleSheetsTabStatus(
                 tab=config.tab,
                 header_row=config.header_row,
@@ -598,7 +643,14 @@ async def google_sheets_status(
                 assigned_scenarist_id=config.assigned_scenarist_id,
             )
             for config in settings.google_sheets_tab_configs
-        ],
+        ]
+    )
+    return GoogleSheetsStatusRead(
+        enabled=settings.google_sheets_enabled,
+        ready=not missing,
+        credential_configured=bool(settings.google_service_account_json),
+        spreadsheet_configured=bool(settings.google_sheets_spreadsheet_id),
+        configured_tabs=configured_tabs,
         safe_import_fields=list(SAFE_IMPORT_FIELDS),
         missing_requirements=missing,
         last_run=last_run,
@@ -613,9 +665,13 @@ async def preview_google_sheets(
     settings: Settings = Depends(get_settings),
 ) -> GoogleSheetsPreviewRead:
     spreadsheet_id = _require_ready(settings)
-    config = _tab_config(settings, payload.tab)
+    source = await _registered_source(session, spreadsheet_id, payload.tab)
+    config = (
+        _config_for_registered_source(source)
+        if source is not None
+        else _tab_config(settings, payload.tab)
+    )
     await _validate_targets(session, config)
-    source = await _registered_source(session, spreadsheet_id, config.tab)
     snapshot = await _snapshot(settings, spreadsheet_id, config, source)
     planned = await plan_rows(
         session, snapshot, spreadsheet_id, config.tab, source=source
@@ -662,7 +718,12 @@ async def sync_google_sheets(
     settings: Settings = Depends(get_settings),
 ) -> GoogleSheetsSyncRead:
     spreadsheet_id = _require_ready(settings)
-    config = _tab_config(settings, payload.tab)
+    source = await _registered_source(session, spreadsheet_id, payload.tab)
+    config = (
+        _config_for_registered_source(source)
+        if source is not None
+        else _tab_config(settings, payload.tab)
+    )
     await _validate_targets(session, config)
     preview = await session.get(GoogleSheetsSyncRun, payload.preview_id)
     if (
@@ -686,7 +747,6 @@ async def sync_google_sheets(
             detail="Preview expired; run preview again",
         )
 
-    source = await _registered_source(session, spreadsheet_id, config.tab)
     snapshot = await _snapshot(settings, spreadsheet_id, config, source)
     if snapshot.checksum != preview.snapshot_checksum:
         raise HTTPException(

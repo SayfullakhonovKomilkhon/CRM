@@ -15,6 +15,7 @@ from crm.google_sheets import (
     GoogleSheetsClient,
     GoogleSheetsSourceError,
     canonical_checksum,
+    unique_sheet_title,
 )
 from crm.main import app
 from crm.models import (
@@ -1121,6 +1122,50 @@ async def test_sheet_bound_scenario_cannot_be_reassigned_to_another_sheet():
     assert error.value.status_code == 409
     assert "another sheet" in error.value.detail
     assert scenario.assigned_scenarist_id == current_scenarist_id
+
+
+async def test_project_shared_sheet_allows_reassignment_without_moving_row():
+    source_id = uuid.uuid4()
+    requested_scenarist_id = uuid.uuid4()
+    scenario = SimpleNamespace(
+        sheet_source_id=source_id,
+        project_id=uuid.uuid4(),
+        assigned_scenarist_id=uuid.uuid4(),
+    )
+    requested_scenarist = SimpleNamespace(
+        id=requested_scenarist_id,
+        full_name="Новый сценарист",
+        role=Role.SCENARIST,
+        is_active=True,
+    )
+    source = SimpleNamespace(
+        id=source_id,
+        enabled=True,
+        assigned_scenarist_id=None,
+    )
+
+    class AssignmentSession:
+        async def get(self, model, _identifier):
+            return source if model is SheetSource else requested_scenarist
+
+    moved, name = await scenario_routes.assign_scenarist_without_moving_sheet_row(
+        AssignmentSession(),
+        scenario,
+        requested_scenarist_id,
+    )
+
+    assert moved is False
+    assert name == "Новый сценарист"
+    assert scenario.assigned_scenarist_id == requested_scenarist_id
+    assert scenario.sheet_source_id == source_id
+
+
+def test_project_tab_title_is_safe_unique_and_does_not_replace_main_tab():
+    existing = {"сценарий", "Новый проект"}
+
+    assert unique_sheet_title("Новый проект", existing) == "Новый проект (2)"
+    assert unique_sheet_title("Клиент / Проект: 1", existing) == "Клиент Проект 1"
+    assert "сценарий" in existing
 
 
 class FakeSession:

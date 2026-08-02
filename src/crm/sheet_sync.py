@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -36,6 +36,7 @@ from crm.models import (
     PublicationPreparationStatus,
     PublicationReviewDecision,
     PublisherStatus,
+    Role,
     Scenario,
     ScenarioApproval,
     ScenarioContent,
@@ -47,6 +48,7 @@ from crm.models import (
     SheetWritebackEvent,
     SheetWritebackStatus,
     SourceMaterialStatus,
+    User,
 )
 from crm.schemas import ScenarioCreate
 from crm.sheet import SCENARIST_OWNED_FIELD_NAMES, SHEET_FIELDS
@@ -83,6 +85,7 @@ CRM_OWNED_WRITEBACK_FIELDS = frozenset(
     WRITEBACK_FIELDS - SCENARIST_OWNED_FIELD_NAMES
 )
 REALTIME_SERVER_CONTROLLED_FIELDS = frozenset({"montage.material_status"})
+SHARED_PROJECT_ASSIGNMENT_FIELDS = frozenset({"scenarist.name"})
 LIVE_SCENARIST_SOURCE_FIELDS = frozenset(
     {
         "montage.source_material_url",
@@ -608,7 +611,7 @@ async def process_inbound_event(
         configured_inbound_fields.add("external_id")
     allowed = (
         configured_inbound_fields
-        & set(SAFE_IMPORT_FIELDS)
+        & (set(SAFE_IMPORT_FIELDS) | set(SHARED_PROJECT_ASSIGNMENT_FIELDS))
         - set(REALTIME_SERVER_CONTROLLED_FIELDS)
     )
     inbound_fields = {
@@ -616,6 +619,7 @@ async def process_inbound_event(
         for field_name, value in event.changed_fields.items()
         if field_name in allowed
     }
+    scenarist_name = str(inbound_fields.pop("scenarist.name", "") or "").strip()
     ignored_fields = sorted(set(event.changed_fields) - allowed)
     if ignored_fields and not inbound_fields:
         event.status = SheetEventStatus.SKIPPED
@@ -713,10 +717,39 @@ async def process_inbound_event(
         event.error = "CRM workflow has started; inbound source updates are locked"
         return event
     scenario_was_new = scenario is None
+    assigned_scenarist_id = source.assigned_scenarist_id
+    if source.assigned_scenarist_id is None and (
+        scenario is None or scenario.assigned_scenarist_id is None
+    ):
+        if not scenarist_name:
+            event.status = SheetEventStatus.FAILED
+            event.error = "Scenarist name is required for a shared project tab"
+            return event
+        scenarists = list(
+            (
+                await session.scalars(
+                    select(User)
+                    .where(
+                        User.role == Role.SCENARIST,
+                        User.is_active.is_(True),
+                        func.lower(User.full_name) == scenarist_name.lower(),
+                    )
+                    .limit(2)
+                )
+            ).all()
+        )
+        if len(scenarists) != 1:
+            event.status = SheetEventStatus.FAILED
+            event.error = (
+                "Shared project tab requires exactly one active CRM scenarist "
+                f"named '{scenarist_name}'"
+            )
+            return event
+        assigned_scenarist_id = scenarists[0].id
     if scenario_was_new:
         scenario = Scenario(
             project_id=source.project_id,
-            assigned_scenarist_id=source.assigned_scenarist_id,
+            assigned_scenarist_id=assigned_scenarist_id,
             sheet_source_id=source.id,
             crm_row_id=event.crm_row_id,
             source_sheet_id=source.spreadsheet_id,
@@ -792,6 +825,8 @@ async def process_inbound_event(
         source_payload = dict(scenario.source_payload or {})
         mapped_fields = dict(source_payload.get("mapped_fields") or {})
         mapped_fields.update(inbound_fields)
+        if scenarist_name:
+            mapped_fields["scenarist.name"] = scenarist_name
         source_payload["mapped_fields"] = mapped_fields
         source_payload["last_event_raw"] = event.raw
         if ignored_fields:
@@ -852,6 +887,51 @@ async def enqueue_sheet_writeback(
     session.add(event)
     await session.flush()
     return event
+
+
+async def bind_unbound_project_scenarios(
+    session: AsyncSession,
+    source: SheetSource,
+) -> int:
+    """Populate a project tab without stealing rows from an existing source."""
+    scenarios = list(
+        (
+            await session.scalars(
+                select(Scenario)
+                .where(
+                    Scenario.project_id == source.project_id,
+                    Scenario.sheet_source_id.is_(None),
+                    Scenario.assigned_scenarist_id.is_not(None),
+                )
+                .options(
+                    selectinload(Scenario.assigned_scenarist),
+                    selectinload(Scenario.research),
+                    selectinload(Scenario.content),
+                    selectinload(Scenario.approvals),
+                    selectinload(Scenario.montage),
+                    selectinload(Scenario.publication),
+                    selectinload(Scenario.final_revision_gate),
+                )
+                .order_by(Scenario.created_at, Scenario.id)
+            )
+        ).all()
+    )
+    for scenario in scenarios:
+        scenario.sheet_source_id = source.id
+        scenario.crm_row_id = scenario.crm_row_id or uuid.uuid4()
+        scenario.source_sheet_id = source.spreadsheet_id
+        scenario.source_tab = source.source_tab
+        scenario.source_row = None
+        await enqueue_sheet_writeback(
+            session,
+            scenario,
+            scenario_writeback_snapshot(
+                scenario,
+                include_empty=True,
+                scenarist_name=scenario.assigned_scenarist.full_name,
+            ),
+        )
+    return len(scenarios)
 
 
 def retry_at(attempts: int) -> datetime:

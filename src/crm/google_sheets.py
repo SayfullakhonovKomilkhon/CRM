@@ -974,6 +974,20 @@ def comparable_row_report(results: list[GoogleSheetsRowResult]) -> list[tuple[An
     ]
 
 
+def unique_sheet_title(requested: str, existing: set[str]) -> str:
+    """Return a valid, deterministic Google tab title without touching existing tabs."""
+    cleaned = re.sub(r"[\\/\?\*\[\]:]", " ", requested).strip()
+    base = re.sub(r"\s+", " ", cleaned)[:90] or "Проект"
+    if base not in existing:
+        return base
+    suffix = 2
+    while True:
+        candidate = f"{base[: 95 - len(str(suffix))]} ({suffix})"
+        if candidate not in existing:
+            return candidate
+        suffix += 1
+
+
 class GoogleSheetsClient:
     def __init__(self, service_account_json: str):
         try:
@@ -1056,6 +1070,85 @@ class GoogleSheetsClient:
         if not isinstance(values, list):
             raise GoogleSheetsSourceError("Google Sheets API returned invalid values")
         return values
+
+    async def duplicate_template_tab(
+        self,
+        spreadsheet_id: str,
+        template_tab: str,
+        requested_title: str,
+        *,
+        header_row: int,
+    ) -> str:
+        """Duplicate a formatted tab and clear only its data rows.
+
+        The template tab is never edited. Formatting, validations, column sizes,
+        frozen rows and headers survive the duplication.
+        """
+        token = await self._access_token()
+        base_url = (
+            "https://sheets.googleapis.com/v4/spreadsheets/"
+            f"{quote(spreadsheet_id, safe='')}"
+        )
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                metadata = await client.get(
+                    base_url,
+                    headers=headers,
+                    params={"fields": "sheets(properties(sheetId,title,index))"},
+                )
+                if metadata.status_code in {401, 403}:
+                    raise GoogleSheetsSourceError(
+                        "Service account cannot edit the configured spreadsheet"
+                    )
+                if metadata.status_code >= 400:
+                    raise GoogleSheetsSourceError(_google_api_error(metadata))
+                sheets = [item.get("properties", {}) for item in metadata.json().get("sheets", [])]
+                template = next(
+                    (item for item in sheets if item.get("title") == template_tab),
+                    None,
+                )
+                if template is None:
+                    raise GoogleSheetsSourceError("Project tab template was not found")
+                title = unique_sheet_title(
+                    requested_title,
+                    {str(item.get("title")) for item in sheets},
+                )
+                duplicated = await client.post(
+                    f"{base_url}:batchUpdate",
+                    headers=headers,
+                    json={
+                        "requests": [
+                            {
+                                "duplicateSheet": {
+                                    "sourceSheetId": template["sheetId"],
+                                    "insertSheetIndex": len(sheets),
+                                    "newSheetName": title,
+                                }
+                            }
+                        ]
+                    },
+                )
+                if duplicated.status_code in {401, 403}:
+                    raise GoogleSheetsSourceError(
+                        "Service account cannot create a project tab"
+                    )
+                if duplicated.status_code >= 400:
+                    raise GoogleSheetsSourceError(_google_api_error(duplicated))
+                escaped_tab = title.replace("'", "''")
+                clear_range = f"'{escaped_tab}'!A{header_row + 1}:ZZ"
+                cleared = await client.post(
+                    f"{base_url}/values/{quote(clear_range, safe='')}:clear",
+                    headers=headers,
+                    json={},
+                )
+                if cleared.status_code >= 400:
+                    raise GoogleSheetsSourceError(_google_api_error(cleared))
+                return title
+        except GoogleSheetsSourceError:
+            raise
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+            raise GoogleSheetsSourceError("Google project tab creation failed") from error
 
     async def batch_update_values(
         self,

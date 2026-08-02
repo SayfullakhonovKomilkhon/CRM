@@ -74,6 +74,7 @@ const CRM_CANONICAL_INBOUND_COLUMN_MAP = {
   "13": "research.improvements",
   "14": "research.replication_template",
   "15": "research.ai_analysis",
+  "16": "scenarist.name",
   "17": "content.claude_context",
   "18": "speaker",
   "19": "content.cover_text",
@@ -148,9 +149,10 @@ function installCrmSync() {
   const spreadsheet = SpreadsheetApp.getActive();
   const props = PropertiesService.getScriptProperties();
   const sourceTab = props.getProperty("CRM_SOURCE_TAB");
-  const sheet = sourceTab ? spreadsheet.getSheetByName(sourceTab) : null;
   const headerRow = Number(props.getProperty("CRM_HEADER_ROW") || "1");
-  if (sheet) ensurePublishedCheckboxes_(sheet, headerRow, headerRow + 1, sheet.getMaxRows());
+  managedCrmSheets_(spreadsheet, props, headerRow).forEach((sheet) =>
+    ensurePublishedCheckboxes_(sheet, headerRow, headerRow + 1, sheet.getMaxRows())
+  );
   ScriptApp.getProjectTriggers()
     .filter((trigger) => ["onCrmEdit", CRM_RECONCILE_HANDLER]
       .includes(trigger.getHandlerFunction()))
@@ -165,7 +167,7 @@ function onCrmEdit(event) {
   const headerRow = Number(props.getProperty("CRM_HEADER_ROW") || "1");
   const sourceTab = props.getProperty("CRM_SOURCE_TAB");
   const sheet = event.range.getSheet();
-  if (!sourceTab || sheet.getName() !== sourceTab) return;
+  if (!isManagedCrmSheet_(sheet, headerRow, sourceTab)) return;
   if (event.range.getLastRow() <= headerRow) return;
 
   // Google API/script writes do not fire installable onEdit triggers. This cache marker
@@ -224,10 +226,16 @@ function reconcileCrmRows() {
   try {
     const props = PropertiesService.getScriptProperties();
     const spreadsheet = SpreadsheetApp.getActive();
-    const sourceTab = props.getProperty("CRM_SOURCE_TAB");
-    const sheet = sourceTab ? spreadsheet.getSheetByName(sourceTab) : null;
-    if (!sheet) return;
     const headerRow = Number(props.getProperty("CRM_HEADER_ROW") || "1");
+    managedCrmSheets_(spreadsheet, props, headerRow).forEach((sheet) =>
+      reconcileCrmSheet_(sheet, spreadsheet, props, headerRow)
+    );
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function reconcileCrmSheet_(sheet, spreadsheet, props, headerRow) {
     const lastRow = sheet.getLastRow();
     if (lastRow <= headerRow) return;
     const map = withRequiredSourceColumns_(
@@ -248,7 +256,8 @@ function reconcileCrmRows() {
       props.getProperty("CRM_RECONCILE_BATCH_SIZE") || CRM_RECONCILE_DEFAULT_BATCH_SIZE
     );
     const batchSize = Math.max(1, Math.min(500, configuredBatch || 0));
-    let cursor = Number(props.getProperty("CRM_RECONCILE_CURSOR") || headerRow + 1);
+    const cursorKey = `CRM_RECONCILE_CURSOR_${sheet.getSheetId()}`;
+    let cursor = Number(props.getProperty(cursorKey) || headerRow + 1);
     if (cursor <= headerRow || cursor > lastRow) cursor = headerRow + 1;
     const endRow = Math.min(lastRow, cursor + batchSize - 1);
     const claimedRowIds = {};
@@ -277,13 +286,26 @@ function reconcileCrmRows() {
         console.warn(`CRM row ${rowNumber} was not synchronized: ${error.message}`);
       }
     }
-    props.setProperty(
-      "CRM_RECONCILE_CURSOR",
-      String(endRow >= lastRow ? headerRow + 1 : endRow + 1)
-    );
-  } finally {
-    lock.releaseLock();
-  }
+    props.setProperty(cursorKey, String(endRow >= lastRow ? headerRow + 1 : endRow + 1));
+}
+
+function isManagedCrmSheet_(sheet, headerRow, sourceTab) {
+  if (!sheet) return false;
+  if (sourceTab && sheet.getName() === sourceTab) return true;
+  const lastColumn = sheet.getLastColumn();
+  if (lastColumn < 1 || sheet.getMaxRows() < headerRow) return false;
+  const headers = sheet.getRange(headerRow, 1, 1, lastColumn)
+    .getDisplayValues()[0]
+    .map(normalizeText_);
+  return headers.includes(normalizeText_(CRM_SUBMISSION_HEADER)) &&
+    headers.includes(normalizeText_("ID"));
+}
+
+function managedCrmSheets_(spreadsheet, props, headerRow) {
+  const sourceTab = props.getProperty("CRM_SOURCE_TAB");
+  return spreadsheet.getSheets().filter((sheet) =>
+    isManagedCrmSheet_(sheet, headerRow, sourceTab)
+  );
 }
 
 function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, options) {

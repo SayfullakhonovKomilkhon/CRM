@@ -232,7 +232,8 @@ class SheetSourceCreate(WriteModel):
     spreadsheet_id: str = Field(min_length=1, max_length=255)
     source_tab: str = Field(min_length=1, max_length=255)
     project_id: uuid.UUID
-    assigned_scenarist_id: uuid.UUID
+    assigned_scenarist_id: uuid.UUID | None = None
+    is_project_template: bool = False
     header_row: int = Field(default=1, ge=1, le=10_000)
     inbound_column_map: dict[str, int | str] = Field(default_factory=dict)
     writeback_column_map: dict[str, int | str] = Field(default_factory=dict)
@@ -244,6 +245,7 @@ class SheetSourceUpdate(WriteModel):
     source_tab: str | None = Field(default=None, min_length=1, max_length=255)
     project_id: uuid.UUID | None = None
     assigned_scenarist_id: uuid.UUID | None = None
+    is_project_template: bool | None = None
     header_row: int | None = Field(default=None, ge=1, le=10_000)
     inbound_column_map: dict[str, int | str] | None = None
     writeback_column_map: dict[str, int | str] | None = None
@@ -256,7 +258,8 @@ class SheetSourceRead(ORMModel):
     spreadsheet_id: str
     source_tab: str
     project_id: uuid.UUID
-    assigned_scenarist_id: uuid.UUID
+    assigned_scenarist_id: uuid.UUID | None
+    is_project_template: bool
     header_row: int
     inbound_column_map: dict[str, int | str]
     writeback_column_map: dict[str, int | str]

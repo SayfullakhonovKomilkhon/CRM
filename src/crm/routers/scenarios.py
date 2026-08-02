@@ -14,7 +14,7 @@ from crm.creation import (
     require_assignable_editor,
     require_assignable_publisher,
     require_assignable_scenarist,
-    require_exact_sheet_source,
+    require_project_sheet_source,
     resolve_scenarist_assignment,
 )
 from crm.database import get_session
@@ -1026,14 +1026,23 @@ async def exact_sheet_source_for_assignment(
                 select(SheetSource)
                 .where(
                     SheetSource.project_id == project_id,
-                    SheetSource.assigned_scenarist_id == assigned_scenarist_id,
+                    or_(
+                        SheetSource.assigned_scenarist_id.is_(None),
+                        SheetSource.assigned_scenarist_id == assigned_scenarist_id,
+                    ),
                     SheetSource.enabled.is_(True),
                 )
                 .order_by(SheetSource.created_at)
             )
         ).all()
     )
-    return require_exact_sheet_source(sources)
+    shared = [source for source in sources if source.assigned_scenarist_id is None]
+    legacy = [
+        source
+        for source in sources
+        if source.assigned_scenarist_id == assigned_scenarist_id
+    ]
+    return require_project_sheet_source(shared, legacy)
 
 
 async def assign_scenarist_without_moving_sheet_row(
@@ -1057,7 +1066,10 @@ async def assign_scenarist_without_moving_sheet_row(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="The scenario Google Sheets source is missing or disabled",
             )
-        if source.assigned_scenarist_id != assigned_scenarist_id:
+        if (
+            source.assigned_scenarist_id is not None
+            and source.assigned_scenarist_id != assigned_scenarist_id
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
@@ -1770,7 +1782,10 @@ async def retry_scenario_sheet_sync(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="The scenario Google Sheets source is missing or disabled",
             )
-        if source.assigned_scenarist_id != assigned_scenarist.id:
+        if (
+            source.assigned_scenarist_id is not None
+            and source.assigned_scenarist_id != assigned_scenarist.id
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(

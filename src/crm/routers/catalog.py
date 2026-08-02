@@ -5,10 +5,12 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from crm.config import Settings, get_settings
 from crm.creation import require_active_client
 from crm.database import get_session
 from crm.dependencies import get_current_user, require_roles
-from crm.models import Client, Project, Role, User
+from crm.google_sheets import GoogleSheetsSourceError, google_sheets_client
+from crm.models import Client, Project, Role, SheetSource, User
 from crm.schemas import (
     ClientCreate,
     ClientRead,
@@ -24,6 +26,7 @@ from crm.schemas import (
     UserOptionRead,
 )
 from crm.security import hash_password
+from crm.sheet_sync import bind_unbound_project_scenarios
 
 router = APIRouter(tags=["catalog"])
 require_catalog_reader = require_roles(
@@ -205,6 +208,7 @@ async def create_project(
     payload: ProjectCreate,
     _: User = Depends(require_roles(Role.ADMIN)),
     session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
 ) -> Project:
     client = require_active_client(await session.get(Client, payload.client_id))
     duplicate = await session.scalar(
@@ -221,6 +225,8 @@ async def create_project(
     project = Project(**payload.model_dump())
     session.add(project)
     try:
+        await session.flush()
+        await _create_project_sheet_tab(session, project, settings)
         await session.commit()
     except IntegrityError as error:
         await session.rollback()
@@ -230,6 +236,84 @@ async def create_project(
         ) from error
     await session.refresh(project)
     return project
+
+
+async def _create_project_sheet_tab(
+    session: AsyncSession,
+    project: Project,
+    settings: Settings,
+) -> SheetSource | None:
+    """Create an optional project tab without changing the legacy main tab.
+
+    Existing installations remain valid: automation only runs when the Google
+    integration is ready and an unambiguous template source can be identified.
+    """
+    spreadsheet_id = settings.google_sheets_spreadsheet_id
+    if not (
+        settings.google_sheets_enabled
+        and settings.google_service_account_json
+        and spreadsheet_id
+    ):
+        return None
+    sources = list(
+        (
+            await session.scalars(
+                select(SheetSource)
+                .where(
+                    SheetSource.spreadsheet_id == spreadsheet_id,
+                    SheetSource.enabled.is_(True),
+                )
+                .order_by(SheetSource.created_at, SheetSource.id)
+            )
+        ).all()
+    )
+    templates = [source for source in sources if source.is_project_template]
+    if len(templates) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Multiple Google Sheets project templates are configured",
+        )
+    template = templates[0] if templates else None
+    if template is None and settings.google_sheets_tab_configs:
+        configured_tab = settings.google_sheets_tab_configs[0].tab
+        template = next(
+            (source for source in sources if source.source_tab == configured_tab),
+            None,
+        )
+    if template is None and len(sources) == 1:
+        template = sources[0]
+    if template is None:
+        # Catalog creation remains backward compatible. The admin can still
+        # register a project-wide source explicitly.
+        return None
+    template.is_project_template = True
+    try:
+        source_tab = await google_sheets_client(settings).duplicate_template_tab(
+            spreadsheet_id,
+            template.source_tab,
+            project.name,
+            header_row=template.header_row,
+        )
+    except GoogleSheetsSourceError as error:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Project was not created because its Google tab failed: {error}",
+        ) from error
+    source = SheetSource(
+        spreadsheet_id=spreadsheet_id,
+        source_tab=source_tab,
+        project_id=project.id,
+        assigned_scenarist_id=None,
+        header_row=template.header_row,
+        inbound_column_map=dict(template.inbound_column_map),
+        writeback_column_map=dict(template.writeback_column_map),
+        crm_row_id_column=template.crm_row_id_column,
+        enabled=True,
+    )
+    session.add(source)
+    await session.flush()
+    await bind_unbound_project_scenarios(session, source)
+    return source
 
 
 @router.patch("/projects/{project_id}", response_model=ProjectRead)

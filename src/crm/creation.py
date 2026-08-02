@@ -117,3 +117,18 @@ def require_exact_sheet_source[SheetSourceT](
             ),
         )
     return sources[0]
+
+
+def require_project_sheet_source[SheetSourceT](
+    shared_sources: Sequence[SheetSourceT],
+    legacy_sources: Sequence[SheetSourceT],
+) -> SheetSourceT:
+    """Prefer a project-wide tab while preserving legacy per-user sources."""
+    if len(shared_sources) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Multiple active Google Sheets sources match this project",
+        )
+    if shared_sources:
+        return shared_sources[0]
+    return require_exact_sheet_source(legacy_sources)

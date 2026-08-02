@@ -4,7 +4,11 @@ Copy `Code.gs` into each source spreadsheet's Apps Script project, set the six
 script properties documented at the top of the file, then run `installCrmSync`
 once as the spreadsheet owner.
 
-`CRM_SOURCE_TAB` is mandatory. Edits on every other tab are ignored. Paste,
+`CRM_SOURCE_TAB` is mandatory and remains the legacy/main tab. Project tabs
+created by CRM are also accepted when their header row contains both `ID` and
+`Отправка на согласование`; unrelated instruction and service tabs remain
+ignored. One Apps Script installation and webhook secret therefore serve the
+main tab plus all registered project tabs in the same spreadsheet. Paste,
 clear, and multi-row/multi-column edits produce one signed event per affected
 row containing every mapped column in that row.
 

@@ -313,7 +313,12 @@ class SheetSource(TimestampMixin, Base):
     spreadsheet_id: Mapped[str] = mapped_column(String(255), index=True)
     source_tab: Mapped[str] = mapped_column(String(255))
     project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id"), index=True)
-    assigned_scenarist_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    # NULL means that every scenarist assigned to this project uses the same
+    # Google Sheets tab.  A non-NULL value is the legacy per-scenarist mode.
+    assigned_scenarist_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
+    is_project_template: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     header_row: Mapped[int] = mapped_column(Integer, default=1)
     inbound_column_map: Mapped[dict] = mapped_column(JSON, default=dict)
     writeback_column_map: Mapped[dict] = mapped_column(JSON, default=dict)
