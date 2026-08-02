@@ -988,6 +988,49 @@ def unique_sheet_title(requested: str, existing: set[str]) -> str:
         suffix += 1
 
 
+def project_tab_format_requests(
+    sheet_id: int,
+    *,
+    header_row: int,
+    row_count: int,
+    column_count: int,
+) -> list[dict[str, Any]]:
+    """Repeat one clean template row across a new project's data area.
+
+    Duplicating a long-lived operational tab also duplicates old manual
+    background overrides. Repeating the first data row's format and validation
+    removes those fragments while preserving headers, widths, frozen rows and
+    conditional-format rules.
+    """
+    if header_row < 1 or row_count <= header_row or column_count < 1:
+        return []
+    source = {
+        "sheetId": sheet_id,
+        "startRowIndex": header_row,
+        "endRowIndex": header_row + 1,
+        "startColumnIndex": 0,
+        "endColumnIndex": column_count,
+    }
+    destination = {
+        "sheetId": sheet_id,
+        "startRowIndex": header_row,
+        "endRowIndex": row_count,
+        "startColumnIndex": 0,
+        "endColumnIndex": column_count,
+    }
+    return [
+        {
+            "copyPaste": {
+                "source": source,
+                "destination": destination,
+                "pasteType": paste_type,
+                "pasteOrientation": "NORMAL",
+            }
+        }
+        for paste_type in ("PASTE_FORMAT", "PASTE_DATA_VALIDATION")
+    ]
+
+
 class GoogleSheetsClient:
     def __init__(self, service_account_json: str):
         try:
@@ -1095,7 +1138,13 @@ class GoogleSheetsClient:
                 metadata = await client.get(
                     base_url,
                     headers=headers,
-                    params={"fields": "sheets(properties(sheetId,title,index))"},
+                    params={
+                        "fields": (
+                            "sheets(properties("
+                            "sheetId,title,index,gridProperties(rowCount,columnCount)"
+                            "))"
+                        )
+                    },
                 )
                 if metadata.status_code in {401, 403}:
                     raise GoogleSheetsSourceError(
@@ -1135,6 +1184,28 @@ class GoogleSheetsClient:
                     )
                 if duplicated.status_code >= 400:
                     raise GoogleSheetsSourceError(_google_api_error(duplicated))
+                duplicated_properties = (
+                    duplicated.json()
+                    .get("replies", [{}])[0]
+                    .get("duplicateSheet", {})
+                    .get("properties", {})
+                )
+                duplicated_sheet_id = duplicated_properties.get("sheetId")
+                grid_properties = duplicated_properties.get("gridProperties", {})
+                row_count = int(
+                    grid_properties.get("rowCount")
+                    or template.get("gridProperties", {}).get("rowCount")
+                    or header_row + 1
+                )
+                column_count = int(
+                    grid_properties.get("columnCount")
+                    or template.get("gridProperties", {}).get("columnCount")
+                    or 1
+                )
+                if not isinstance(duplicated_sheet_id, int):
+                    raise GoogleSheetsSourceError(
+                        "Google Sheets did not return the duplicated project tab"
+                    )
                 escaped_tab = title.replace("'", "''")
                 clear_range = f"'{escaped_tab}'!A{header_row + 1}:ZZ"
                 cleared = await client.post(
@@ -1144,6 +1215,20 @@ class GoogleSheetsClient:
                 )
                 if cleared.status_code >= 400:
                     raise GoogleSheetsSourceError(_google_api_error(cleared))
+                format_requests = project_tab_format_requests(
+                    duplicated_sheet_id,
+                    header_row=header_row,
+                    row_count=row_count,
+                    column_count=column_count,
+                )
+                if format_requests:
+                    normalized = await client.post(
+                        f"{base_url}:batchUpdate",
+                        headers=headers,
+                        json={"requests": format_requests},
+                    )
+                    if normalized.status_code >= 400:
+                        raise GoogleSheetsSourceError(_google_api_error(normalized))
                 return title
         except GoogleSheetsSourceError:
             raise

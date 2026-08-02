@@ -159,6 +159,50 @@ function installCrmSync() {
     .forEach((trigger) => ScriptApp.deleteTrigger(trigger));
   ScriptApp.newTrigger("onCrmEdit").forSpreadsheet(spreadsheet).onEdit().create();
   ScriptApp.newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5).create();
+  normalizeProjectTabFormatting();
+}
+
+/**
+ * Remove historical one-off cell colours from project tabs without touching
+ * the legacy master tab. The first data row is the canonical visual template.
+ */
+function normalizeProjectTabFormatting() {
+  const spreadsheet = SpreadsheetApp.getActive();
+  const props = PropertiesService.getScriptProperties();
+  const sourceTab = props.getProperty("CRM_SOURCE_TAB");
+  const headerRow = Number(props.getProperty("CRM_HEADER_ROW") || "1");
+  managedCrmSheets_(spreadsheet, props, headerRow)
+    .filter((sheet) => !sourceTab || sheet.getName() !== sourceTab)
+    .forEach((sheet) => normalizeProjectRows_(
+      sheet,
+      headerRow,
+      headerRow + 1,
+      sheet.getMaxRows()
+    ));
+}
+
+function normalizeProjectRows_(sheet, headerRow, firstRow, lastRow) {
+  const targetFirstRow = Math.max(firstRow, headerRow + 2);
+  if (lastRow < targetFirstRow || sheet.getMaxRows() <= headerRow) return;
+  const columnCount = sheet.getLastColumn();
+  if (columnCount < 1) return;
+  const template = sheet.getRange(headerRow + 1, 1, 1, columnCount);
+  const destination = sheet.getRange(
+    targetFirstRow,
+    1,
+    lastRow - targetFirstRow + 1,
+    columnCount
+  );
+  template.copyTo(
+    destination,
+    SpreadsheetApp.CopyPasteType.PASTE_FORMAT,
+    false
+  );
+  template.copyTo(
+    destination,
+    SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION,
+    false
+  );
 }
 
 function onCrmEdit(event) {
@@ -188,6 +232,9 @@ function onCrmEdit(event) {
   );
   const firstRow = Math.max(event.range.getRow(), headerRow + 1);
   const lastRow = event.range.getLastRow();
+  if (!sourceTab || sheet.getName() !== sourceTab) {
+    normalizeProjectRows_(sheet, headerRow, firstRow, lastRow);
+  }
   const editedColumns = new Set(Array.from(
     {length: event.range.getNumColumns()},
     (_, offset) => String(event.range.getColumn() + offset)

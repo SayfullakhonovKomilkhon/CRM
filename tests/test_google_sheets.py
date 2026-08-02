@@ -15,6 +15,7 @@ from crm.google_sheets import (
     canonical_checksum,
     parse_date,
     parse_sheet_values,
+    project_tab_format_requests,
     resolve_columns,
     submission_requested,
     workflow_is_locked,
@@ -56,6 +57,45 @@ def test_settings_reject_duplicate_tabs_case_insensitively():
                 {"tab": "content", "project_id": project_id},
             ],
         )
+
+
+def test_project_tab_format_repeats_clean_first_data_row():
+    requests = project_tab_format_requests(
+        314,
+        header_row=4,
+        row_count=1000,
+        column_count=78,
+    )
+
+    assert [item["copyPaste"]["pasteType"] for item in requests] == [
+        "PASTE_FORMAT",
+        "PASTE_DATA_VALIDATION",
+    ]
+    for item in requests:
+        operation = item["copyPaste"]
+        assert operation["source"] == {
+            "sheetId": 314,
+            "startRowIndex": 4,
+            "endRowIndex": 5,
+            "startColumnIndex": 0,
+            "endColumnIndex": 78,
+        }
+        assert operation["destination"] == {
+            "sheetId": 314,
+            "startRowIndex": 4,
+            "endRowIndex": 1000,
+            "startColumnIndex": 0,
+            "endColumnIndex": 78,
+        }
+
+
+def test_project_tab_format_skips_sheet_without_data_rows():
+    assert project_tab_format_requests(
+        314,
+        header_row=4,
+        row_count=4,
+        column_count=78,
+    ) == []
 
 
 def test_parse_date_accepts_day_and_month_using_current_year():
