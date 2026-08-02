@@ -630,8 +630,12 @@ function ensureRowDateFormats_(sheet, rowNumber, map) {
     const cell = sheet.getRange(rowNumber, Number(column));
     const rawValue = cell.getValue();
     if (rawValue === null || rawValue === "") return;
+    const numericValue = Number(rawValue);
     if (Object.prototype.toString.call(rawValue) === "[object Date]" ||
-        (typeof rawValue === "number" && Number.isFinite(rawValue))) {
+        (Number.isFinite(numericValue) && numericValue >= 1)) {
+      if (typeof rawValue === "string" && Number.isFinite(numericValue)) {
+        cell.setValue(numericValue);
+      }
       cell.setNumberFormat("yyyy-mm-dd");
     }
   });
