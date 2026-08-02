@@ -15,6 +15,7 @@ const CRM_RECONCILE_HANDLER = "reconcileCrmRows";
 const CRM_RECONCILE_DEFAULT_BATCH_SIZE = 100;
 const CRM_SCENARIST_INBOUND_FIELDS = new Set([
   "external_id",
+  "scenarist.name",
   "scenario_date",
   "speaker",
   "deadline",

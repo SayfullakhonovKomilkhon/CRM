@@ -168,6 +168,7 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     assert "rowIdAppearsEarlier_" in script
     assert "One malformed or workflow-locked row must not block rows below it." in script
     assert "const CRM_SCENARIST_INBOUND_FIELDS = new Set([" in script
+    assert '"scenarist.name",' in script
     assert "const CRM_CANONICAL_INBOUND_COLUMN_MAP = {" in script
     assert '"57": "publication.publication_date"' in script
     assert '"62": "publication.description_instagram"' in script
