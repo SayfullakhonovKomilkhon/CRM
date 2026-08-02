@@ -299,13 +299,17 @@ async def _create_project_sheet_tab(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Project was not created because its Google tab failed: {error}",
         ) from error
+    inbound_column_map = dict(template.inbound_column_map)
+    scenarist_column = template.writeback_column_map.get("scenarist.name")
+    if scenarist_column:
+        inbound_column_map["scenarist.name"] = scenarist_column
     source = SheetSource(
         spreadsheet_id=spreadsheet_id,
         source_tab=source_tab,
         project_id=project.id,
         assigned_scenarist_id=None,
         header_row=template.header_row,
-        inbound_column_map=dict(template.inbound_column_map),
+        inbound_column_map=inbound_column_map,
         writeback_column_map=dict(template.writeback_column_map),
         crm_row_id_column=template.crm_row_id_column,
         enabled=True,
