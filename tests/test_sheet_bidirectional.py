@@ -441,6 +441,8 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
 
     regenerated_row_id = uuid.uuid4()
     live_existing.external_id = "20260802901"
+    live_existing.sheet_source_id = uuid.uuid4()
+    live_existing.source_tab = "сценарий"
     recovered_session = InboundSession(
         inbound_event(
             "",
@@ -459,6 +461,9 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     )
     assert recovered_result.status == SheetEventStatus.COMPLETED
     assert live_existing.crm_row_id == regenerated_row_id
+    assert live_existing.sheet_source_id == source_id
+    assert live_existing.source_sheet_id == "sheet-1"
+    assert live_existing.source_tab == "сценарий"
     assert live_existing.source_row == 5
     assert (
         live_existing.montage.source_material_url

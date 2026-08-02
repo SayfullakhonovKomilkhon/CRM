@@ -697,7 +697,12 @@ async def process_inbound_event(
                 .where(
                     Scenario.project_id == source.project_id,
                     Scenario.external_id == external_id,
-                    Scenario.sheet_source_id == source.id,
+                    # A project tab can be recreated or registered after its
+                    # scenarios were imported. In that case the business row
+                    # still points at the same tab/external ID, while the
+                    # internal SheetSource UUID is stale. Recover that binding
+                    # from the stable project + tab + visible ID tuple.
+                    Scenario.source_tab == source.source_tab,
                 )
                 .options(
                     selectinload(Scenario.research),
@@ -710,7 +715,10 @@ async def process_inbound_event(
                 .with_for_update()
             )
             if recovered_scenario is not None:
+                recovered_scenario.sheet_source_id = source.id
                 recovered_scenario.crm_row_id = event.crm_row_id
+                recovered_scenario.source_sheet_id = source.spreadsheet_id
+                recovered_scenario.source_tab = source.source_tab
                 recovered_scenario.source_row = event.row_number
                 scenario = recovered_scenario
     live_update = bool(live_update_payload and scenario is not None)
