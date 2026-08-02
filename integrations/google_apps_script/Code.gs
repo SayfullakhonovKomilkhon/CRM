@@ -417,6 +417,7 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
     : liveUpdate
     ? liveColumns
     : null;
+  ensureRowDateFormats_(sheet, rowNumber, map);
   const fields = fullRowFields_(sheet, rowNumber, map, {
     includeEmptySourceFields: hasExistingIdentity,
     onlyColumns: selectedColumns
@@ -621,6 +622,19 @@ function fullRowFields_(sheet, rowNumber, map, options) {
     fields[field] = value === "" ? null : value;
   });
   return fields;
+}
+
+function ensureRowDateFormats_(sheet, rowNumber, map) {
+  Object.keys(map).forEach((column) => {
+    if (!CRM_DATE_FIELDS.has(map[column])) return;
+    const cell = sheet.getRange(rowNumber, Number(column));
+    const rawValue = cell.getValue();
+    if (rawValue === null || rawValue === "") return;
+    if (Object.prototype.toString.call(rawValue) === "[object Date]" ||
+        (typeof rawValue === "number" && Number.isFinite(rawValue))) {
+      cell.setNumberFormat("yyyy-mm-dd");
+    }
+  });
 }
 
 function normalizedSheetDate_(rawValue, displayValue, timeZone) {
