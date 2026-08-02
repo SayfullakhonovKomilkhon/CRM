@@ -117,6 +117,90 @@ LIVE_SCENARIST_FIELDS = (
     LIVE_SCENARIST_SOURCE_FIELDS | LIVE_SCENARIST_PUBLICATION_FIELDS
 )
 
+# CRM keeps stable English enum values in the API/database. Google Sheets is a
+# user-facing surface, so workflow cells receive Russian labels instead. Keep
+# this field-aware: arbitrary scenario text containing e.g. "approved" must not
+# be translated.
+SHEET_APPROVAL_STATUS_FIELDS = frozenset(
+    item.field
+    for item in SHEET_FIELDS
+    if item.field.startswith("approval.") and item.field.endswith(".decision")
+)
+SHEET_GENERIC_STATUS_LABELS = {
+    "pending": "Ожидает",
+    "waiting": "Ожидает",
+    "draft": "Черновик",
+    "in_review": "На проверке",
+    "ready_for_review": "Готово к проверке",
+    "revision": "Доработка",
+    "rejected": "Отказ",
+    "approved": "Одобрено",
+    "sent_to_generation": "Передано в производство",
+    "handed_to_editor": "Передано монтажёру",
+    "editing": "Монтаж",
+    "client_review": "На проверке у клиента",
+    "manager_revision_review": "Проверка доработки",
+    "ready_to_publish": "Готово к публикации",
+    "published": "Опубликовано",
+    "archived": "Архив",
+    "assigned": "Назначено",
+    "in_progress": "В работе",
+    "ready": "Готово",
+    "not_ready": "Не готово",
+    "review": "Проверить",
+    "fixed": "Исправлено",
+    "completed": "Завершено",
+    "failed": "Ошибка",
+}
+SHEET_STATUS_LABELS: dict[str, dict[str, str]] = {
+    **{
+        field: {
+            "pending": "Ожидает",
+            "approved": "Одобрено",
+            "revision": "Доработать",
+            "rejected": "Отказ",
+        }
+        for field in SHEET_APPROVAL_STATUS_FIELDS
+    },
+    "montage.material_status": {
+        "draft": "В работе",
+        "ready_for_review": "На проверке",
+        "revision": "На доработке",
+        "approved": "Одобрено",
+        "rejected": "Отказ",
+    },
+    "montage.editor_status": {
+        "pending": "Ожидает",
+        "in_progress": "В работе",
+        "ready": "Готово",
+        "not_ready": "Не готово",
+        "review": "Проверить",
+        "fixed": "Исправлено",
+    },
+    "final_revision_gate.decision": {
+        "pending": "Ожидает",
+        "approved": "Одобрено",
+        "rejected": "Отказ",
+    },
+    "publication.manager_review_decision": {
+        "pending": "Ожидает",
+        "approved": "Одобрено",
+        "revision": "Доработать",
+    },
+    "publication.publisher_status": {
+        "pending": "Ожидает назначения",
+        "assigned": "Назначено",
+        "in_progress": "В работе",
+        "published": "Опубликовано",
+    },
+    "publication.preparation_status": {
+        "draft": "В работе",
+        "ready_for_review": "На проверке",
+        "revision": "На доработке",
+        "approved": "Одобрено",
+    },
+}
+
 
 def source_webhook_secret(settings: Settings, source: SheetSource) -> str:
     material = f"sheet-source:{source.id}:{source.webhook_secret_version}".encode()
@@ -808,7 +892,10 @@ def append_row_values(
 ) -> tuple[str, list[Any]]:
     writeback_map = effective_writeback_column_map(source)
     mapped = {
-        column_number(writeback_map[field_name]): sheet_cell_value(value)
+        column_number(writeback_map[field_name]): sheet_cell_value(
+            value,
+            field_name=field_name,
+        )
         for field_name, value in changed_fields.items()
     }
     identity_column = column_number(source.crm_row_id_column)
@@ -929,7 +1016,7 @@ async def process_writeback_event(
                 f"{scenario.source_row}"
             ),
             "majorDimension": "ROWS",
-            "values": [[sheet_cell_value(value)]],
+            "values": [[sheet_cell_value(value, field_name=field_name)]],
         }
         for field_name, value in approved.items()
     ]
@@ -981,9 +1068,30 @@ async def process_writeback_event(
     return event
 
 
-def sheet_cell_value(value: Any) -> Any:
-    """Google values API uses an empty string to clear a stale cell."""
-    return "" if value is None else value
+def sheet_cell_value(value: Any, *, field_name: str | None = None) -> Any:
+    """Return a localized, Google-compatible cell value.
+
+    Values stored in the CRM and the transactional outbox remain canonical.
+    Only known workflow fields are localized at the final Sheets boundary.
+    """
+    if value is None:
+        return ""
+    if hasattr(value, "value"):
+        value = value.value
+    if field_name is None or not isinstance(value, str):
+        return value
+    canonical_value = value.strip().lower()
+    field_labels = SHEET_STATUS_LABELS.get(field_name)
+    if field_labels is not None:
+        return field_labels.get(canonical_value, value)
+    if (
+        field_name == "status"
+        or field_name.endswith("_status")
+        or field_name.endswith(".status")
+        or field_name.endswith(".decision")
+    ):
+        return SHEET_GENERIC_STATUS_LABELS.get(canonical_value, value)
+    return value
 
 
 def scenario_writeback_snapshot(

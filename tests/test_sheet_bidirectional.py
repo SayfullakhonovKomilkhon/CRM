@@ -55,6 +55,7 @@ from crm.sheet_sync import (
     inbound_update_allowed,
     process_inbound_event,
     process_writeback_event,
+    sheet_cell_value,
     source_metadata_matches,
     source_webhook_secret,
     submission_requested,
@@ -846,6 +847,100 @@ def test_new_sheet_row_places_fields_and_identity_in_sparse_columns():
     assert values[1] == "124"
     assert values[19] == "Новый сценарий"
     assert values[78] == str(row_id)
+
+
+def test_sheet_status_values_are_localized_without_touching_content_or_checkbox():
+    assert (
+        sheet_cell_value(
+            "approved",
+            field_name="approval.responsible_review.decision",
+        )
+        == "Одобрено"
+    )
+    assert (
+        sheet_cell_value("rejected", field_name="approval.final_client.decision")
+        == "Отказ"
+    )
+    assert (
+        sheet_cell_value(
+            "published",
+            field_name="publication.publisher_status",
+        )
+        == "Опубликовано"
+    )
+    assert (
+        sheet_cell_value(
+            "ready_for_review",
+            field_name="montage.material_status",
+        )
+        == "На проверке"
+    )
+    assert sheet_cell_value("approved", field_name="content.script_text") == "approved"
+    assert sheet_cell_value(True, field_name="publication.is_published") is True
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "expected"),
+    [
+        ("approval.pre_generation_client.decision", "pending", "Ожидает"),
+        ("approval.source_material.decision", "revision", "Доработать"),
+        ("approval.montage_compliance.decision", "rejected", "Отказ"),
+        ("montage.material_status", "draft", "В работе"),
+        ("montage.material_status", "ready_for_review", "На проверке"),
+        ("montage.editor_status", "in_progress", "В работе"),
+        ("montage.editor_status", "fixed", "Исправлено"),
+        ("final_revision_gate.decision", "approved", "Одобрено"),
+        ("publication.manager_review_decision", "revision", "Доработать"),
+        ("publication.preparation_status", "ready_for_review", "На проверке"),
+        ("publication.publisher_status", "assigned", "Назначено"),
+        ("publication.publisher_status", "in_progress", "В работе"),
+        ("publication.publisher_status", "published", "Опубликовано"),
+        ("montage.brief_compliance_status", "APPROVED", "Одобрено"),
+        ("montage.scenarist_revision_status", "completed", "Завершено"),
+    ],
+)
+def test_every_sheet_workflow_status_family_is_localized(field_name, value, expected):
+    assert sheet_cell_value(value, field_name=field_name) == expected
+
+
+def test_unknown_or_already_russian_status_is_preserved():
+    assert (
+        sheet_cell_value("Особый статус", field_name="montage.brief_compliance_status")
+        == "Особый статус"
+    )
+    assert (
+        sheet_cell_value("Готово", field_name="montage.editor_status")
+        == "Готово"
+    )
+
+
+def test_new_sheet_row_localizes_only_workflow_fields():
+    row_id = uuid.uuid4()
+    source = SimpleNamespace(
+        crm_row_id_column="BZ",
+        writeback_column_map={
+            "content.script_text": "T",
+            "approval.responsible_review.decision": "AE",
+            "publication.publisher_status": "CL",
+            "publication.is_published": "BK",
+        },
+    )
+
+    _, values = append_row_values(
+        source,
+        row_id,
+        {
+            "content.script_text": "approved",
+            "approval.responsible_review.decision": "approved",
+            "publication.publisher_status": "published",
+            "publication.is_published": True,
+        },
+    )
+
+    assert values[column_number("T") - 1] == "approved"
+    assert values[column_number("AE") - 1] == "Одобрено"
+    assert values[column_number("CL") - 1] == "Опубликовано"
+    assert values[column_number("BK") - 1] is True
 
 
 def test_create_writeback_is_built_from_payload_without_lazy_relationship_reads():
