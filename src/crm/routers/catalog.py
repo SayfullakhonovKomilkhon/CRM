@@ -26,6 +26,7 @@ from crm.schemas import (
     UserOptionRead,
 )
 from crm.security import hash_password
+from crm.sheet_mapping import CANONICAL_WRITEBACK_COLUMN_MAP
 from crm.sheet_sync import bind_unbound_project_scenarios
 
 router = APIRouter(tags=["catalog"])
@@ -300,7 +301,10 @@ async def _create_project_sheet_tab(
             detail=f"Project was not created because its Google tab failed: {error}",
         ) from error
     inbound_column_map = dict(template.inbound_column_map)
-    scenarist_column = template.writeback_column_map.get("scenarist.name")
+    scenarist_column = template.writeback_column_map.get(
+        "scenarist.name",
+        CANONICAL_WRITEBACK_COLUMN_MAP["scenarist.name"],
+    )
     if scenarist_column:
         inbound_column_map["scenarist.name"] = scenarist_column
     source = SheetSource(
