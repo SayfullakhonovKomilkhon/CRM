@@ -397,6 +397,24 @@ async def list_inbound_events(
     )
 
 
+@router.post(
+    "/inbound-events/{inbound_event_id}/retry",
+    response_model=SheetInboundEventRead,
+)
+async def retry_inbound_event(
+    inbound_event_id: uuid.UUID,
+    _: User = Depends(require_roles(Role.ADMIN)),
+    session: AsyncSession = Depends(get_session),
+) -> SheetInboundEvent:
+    event = await session.get(SheetInboundEvent, inbound_event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Inbound event not found")
+    processed = await process_inbound_event(session, event.id)
+    await session.commit()
+    await session.refresh(processed)
+    return processed
+
+
 @router.get("/writeback-events", response_model=list[SheetWritebackEventRead])
 async def list_writeback_events(
     source_id: uuid.UUID | None = None,

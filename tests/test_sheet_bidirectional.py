@@ -1671,6 +1671,9 @@ def test_openapi_documents_management_webhook_and_event_contracts():
     accepted_schema = app.openapi()["components"]["schemas"]["SheetWebhookAccepted"]
     assert "error" in accepted_schema["properties"]
     assert "/api/v1/google-sheets/inbound-events" in paths
+    assert "post" in paths[
+        "/api/v1/google-sheets/inbound-events/{inbound_event_id}/retry"
+    ]
     assert "/api/v1/google-sheets/writeback-events" in paths
     assert "post" in paths["/api/v1/scenarios/{scenario_id}/sheet-sync/retry"]
 
