@@ -622,6 +622,26 @@ async def process_inbound_event(
         for field_name, value in event.changed_fields.items()
         if field_name in allowed
     }
+    # Older Apps Script installations send the whole visible row even for an
+    # explicit late-stage action.  Do not let unchanged scenario/research
+    # cells turn a source-material or publication submission into a forbidden
+    # attempt to rewrite the already-started workflow.  The stage marker is
+    # server-controlled, so it is safe to narrow that snapshot here as well as
+    # in the current Apps Script client.
+    if source_submit_requested:
+        inbound_fields = {
+            field_name: value
+            for field_name, value in inbound_fields.items()
+            if field_name in LIVE_SCENARIST_SOURCE_FIELDS
+            or field_name == "external_id"
+        }
+    elif publication_submit_requested:
+        inbound_fields = {
+            field_name: value
+            for field_name, value in inbound_fields.items()
+            if field_name in LIVE_SCENARIST_PUBLICATION_FIELDS
+            or field_name == "external_id"
+        }
     scenarist_name = str(inbound_fields.pop("scenarist.name", "") or "").strip()
     ignored_fields = sorted(set(event.changed_fields) - allowed)
     if ignored_fields and not inbound_fields:

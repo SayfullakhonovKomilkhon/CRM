@@ -375,6 +375,16 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
   const rowIdCell = sheet.getRange(rowNumber, rowIdColumn);
   const rawRowId = rowIdCell.getDisplayValue().trim();
   const hasExistingIdentity = isUuid_(rawRowId);
+  const externalIdColumn = Object.keys(map).find(
+    (column) => map[column] === "external_id"
+  );
+  const visibleExternalId = externalIdColumn
+    ? sheet.getRange(rowNumber, Number(externalIdColumn)).getDisplayValue().trim()
+    : "";
+  // Project tabs can be recreated or copied without the protected BZ UUID.
+  // Their visible business ID is enough for the backend to recover the exact
+  // scenario, while this run restores a fresh protected UUID for later edits.
+  const hasRecoverableIdentity = hasExistingIdentity || visibleExternalId !== "";
   const liveColumns = new Set(
     Array.from(options.editedColumns || []).filter(
       (column) => CRM_LIVE_FIELDS.has(map[column])
@@ -387,7 +397,7 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
   const publicationReady = rowHasPublicationReadyContent_(sheet, rowNumber, map);
   const publicationColumnEdited = !isRecoveryScan &&
     Array.from(options.editedColumns).some((column) => publicationColumns.has(column));
-  const sourceSubmitRequested = !submissionRequested && hasExistingIdentity &&
+  const sourceSubmitRequested = !submissionRequested && hasRecoverableIdentity &&
     isWorkflowSubmissionRequested_(sourceSubmissionStatus) &&
     (isRecoveryScan || options.editedColumns.has(String(options.sourceSubmissionColumn)));
   const explicitPublicationSubmit = isWorkflowSubmissionRequested_(
@@ -397,10 +407,10 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
   ));
   const automaticPublicationSubmit = publicationReady &&
     (isRecoveryScan || publicationColumnEdited);
-  const publicationSubmitRequested = !submissionRequested && hasExistingIdentity &&
+  const publicationSubmitRequested = !submissionRequested && hasRecoverableIdentity &&
     (explicitPublicationSubmit || automaticPublicationSubmit);
   const liveUpdate = !submissionRequested && !sourceSubmitRequested &&
-    !publicationSubmitRequested && hasExistingIdentity && liveColumns.size > 0;
+    !publicationSubmitRequested && hasRecoverableIdentity && liveColumns.size > 0;
   if (!submissionRequested && !sourceSubmitRequested &&
       !publicationSubmitRequested && !liveUpdate) return false;
   const syncMode = submissionRequested
@@ -427,7 +437,7 @@ function syncCrmRow_(sheet, rowNumber, map, rowIdColumn, props, spreadsheetId, o
   }
   ensureRowDateFormats_(sheet, rowNumber, map);
   const fields = fullRowFields_(sheet, rowNumber, map, {
-    includeEmptySourceFields: hasExistingIdentity,
+    includeEmptySourceFields: hasRecoverableIdentity,
     onlyColumns: selectedColumns
   });
 

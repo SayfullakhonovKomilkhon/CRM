@@ -174,7 +174,12 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
     ).read_text()
 
     assert "fullRowFields_" in script
-    assert "includeEmptySourceFields: hasExistingIdentity" in script
+    assert "includeEmptySourceFields: hasRecoverableIdentity" in script
+    assert (
+        'const hasRecoverableIdentity = hasExistingIdentity || visibleExternalId !== ""'
+        in script
+    )
+    assert "publicationSubmitRequested = !submissionRequested && hasRecoverableIdentity" in script
     assert "rowIdAppearsEarlier_" in script
     assert "One malformed or workflow-locked row must not block rows below it." in script
     assert "const CRM_SCENARIST_INBOUND_FIELDS = new Set([" in script
@@ -544,6 +549,39 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
         publication_submit_session.event.id,
     )
     assert publication_submit_result.status == SheetEventStatus.COMPLETED
+    assert (
+        publication_existing.publication.preparation_status
+        == PublicationPreparationStatus.READY_FOR_REVIEW.value
+    )
+
+    # Backward compatibility: project tabs can still run an older Apps Script
+    # that submits a complete row snapshot for a publication action.  Locked
+    # scenario fields in that snapshot must be ignored rather than rejecting
+    # the publication fields that belong to the current stage.
+    source.inbound_column_map["speaker"] = "R"
+    legacy_full_snapshot_session = InboundSession(
+        inbound_event(
+            "",
+            {
+                "external_id": "20260802901",
+                "speaker": "Не должно перезаписаться",
+                "publication.description_youtube": "Полный снимок старого скрипта",
+            },
+            publication_row_id,
+            "publication_submit",
+        ),
+        publication_existing,
+    )
+    legacy_full_snapshot_result = await process_inbound_event(
+        legacy_full_snapshot_session,
+        legacy_full_snapshot_session.event.id,
+    )
+    assert legacy_full_snapshot_result.status == SheetEventStatus.COMPLETED
+    assert publication_existing.speaker is None
+    assert (
+        publication_existing.publication.description_youtube
+        == "Полный снимок старого скрипта"
+    )
     assert (
         publication_existing.publication.preparation_status
         == PublicationPreparationStatus.READY_FOR_REVIEW.value
