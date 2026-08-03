@@ -179,6 +179,9 @@ def test_apps_script_syncs_full_partial_rows_and_has_recovery_trigger():
         'const hasRecoverableIdentity = hasExistingIdentity || visibleExternalId !== ""'
         in script
     )
+    assert "function refreshCrmScenaristDropdowns()" in script
+    assert ".requireValueInList(names, true)" in script
+    assert '`${webhookUrl}/scenarists`' in script
     assert "publicationSubmitRequested = !submissionRequested && hasRecoverableIdentity" in script
     assert "rowIdAppearsEarlier_" in script
     assert "One malformed or workflow-locked row must not block rows below it." in script
@@ -1722,6 +1725,9 @@ def test_openapi_documents_management_webhook_and_event_contracts():
     assert "202" in webhook["responses"]
     accepted_schema = app.openapi()["components"]["schemas"]["SheetWebhookAccepted"]
     assert "error" in accepted_schema["properties"]
+    assert "post" in paths[
+        "/api/v1/google-sheets/webhook/{source_id}/scenarists"
+    ]
     assert "/api/v1/google-sheets/inbound-events" in paths
     assert "post" in paths[
         "/api/v1/google-sheets/inbound-events/{inbound_event_id}/retry"

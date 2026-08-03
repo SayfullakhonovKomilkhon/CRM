@@ -166,7 +166,53 @@ function installCrmSync() {
     .forEach((trigger) => ScriptApp.deleteTrigger(trigger));
   ScriptApp.newTrigger("onCrmEdit").forSpreadsheet(spreadsheet).onEdit().create();
   ScriptApp.newTrigger(CRM_RECONCILE_HANDLER).timeBased().everyMinutes(5).create();
+  refreshCrmScenaristDropdowns();
   normalizeProjectTabFormatting();
+}
+
+/** Refresh the scenarist selector from active CRM accounts. */
+function refreshCrmScenaristDropdowns() {
+  const spreadsheet = SpreadsheetApp.getActive();
+  const props = PropertiesService.getScriptProperties();
+  const webhookUrl = props.getProperty("CRM_WEBHOOK_URL");
+  const secret = props.getProperty("CRM_WEBHOOK_SECRET");
+  const response = postSigned_(`${webhookUrl}/scenarists`, secret, {
+    spreadsheet_id: spreadsheet.getId()
+  });
+  const names = Array.from(new Set((response || [])
+    .map((item) => String(item.full_name || "").trim())
+    .filter(Boolean)))
+    .sort((left, right) => left.localeCompare(right, "ru"));
+  if (names.length === 0) {
+    console.warn("CRM returned no active scenarists; existing dropdowns were kept");
+    return 0;
+  }
+  const headerRow = Number(props.getProperty("CRM_HEADER_ROW") || "1");
+  const rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(names, true)
+    .setAllowInvalid(false)
+    .setHelpText("Выберите активного сценариста из CRM")
+    .build();
+  let updatedSheets = 0;
+  managedCrmSheets_(spreadsheet, props, headerRow).forEach((sheet) => {
+    const map = withRequiredSourceColumns_(
+      sheet,
+      headerRow,
+      JSON.parse(props.getProperty("CRM_INBOUND_COLUMN_MAP") || "{}")
+    );
+    const column = Object.keys(map).find(
+      (reference) => map[reference] === "scenarist.name"
+    );
+    if (!column) return;
+    sheet.getRange(
+      headerRow + 1,
+      Number(column),
+      sheet.getMaxRows() - headerRow,
+      1
+    ).setDataValidation(rule);
+    updatedSheets += 1;
+  });
+  return updatedSheets;
 }
 
 /**
@@ -284,6 +330,11 @@ function reconcileCrmRows() {
     managedCrmSheets_(spreadsheet, props, headerRow).forEach((sheet) =>
       reconcileCrmSheet_(sheet, spreadsheet, props, headerRow)
     );
+    try {
+      refreshCrmScenaristDropdowns();
+    } catch (error) {
+      console.warn(`CRM scenarist dropdown refresh failed: ${error.message}`);
+    }
   } finally {
     lock.releaseLock();
   }

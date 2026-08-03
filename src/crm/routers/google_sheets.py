@@ -57,6 +57,7 @@ from crm.schemas import (
     SheetWebhookAccepted,
     SheetWebhookEvent,
     SheetWritebackEventRead,
+    UserOptionRead,
 )
 from crm.sheet_mapping import effective_writeback_column_map
 from crm.sheet_sync import (
@@ -376,6 +377,48 @@ async def receive_sheet_webhook(
         queued=False,
         error=processed.error,
     )
+
+
+@router.post(
+    "/webhook/{source_id}/scenarists",
+    response_model=list[UserOptionRead],
+)
+async def sheet_scenarist_options(
+    source_id: uuid.UUID,
+    request: Request,
+    x_crm_timestamp: str | None = Header(default=None),
+    x_crm_signature: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+) -> list[User]:
+    """Return the active scenarist directory to an authenticated Sheet script."""
+    source = await session.get(SheetSource, source_id)
+    if source is None or not source.enabled:
+        raise HTTPException(status_code=404, detail="Sheet source not found")
+    body = await request.body()
+    verify_webhook(
+        secret=source_webhook_secret(settings, source),
+        timestamp=x_crm_timestamp,
+        signature=x_crm_signature,
+        body=body,
+        now=datetime.now(UTC),
+        max_age_seconds=settings.sheet_webhook_max_age_seconds,
+    )
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Invalid JSON payload") from error
+    if payload.get("spreadsheet_id") != source.spreadsheet_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Directory request spreadsheet does not match the source",
+        )
+    query = (
+        select(User)
+        .where(User.role == Role.SCENARIST, User.is_active.is_(True))
+        .order_by(User.full_name, User.id)
+    )
+    return list((await session.scalars(query)).all())
 
 
 @router.get("/inbound-events", response_model=list[SheetInboundEventRead])
