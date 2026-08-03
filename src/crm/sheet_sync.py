@@ -742,6 +742,13 @@ async def process_inbound_event(
     # row snapshot.  Infer only the currently open scenarist stage from CRM
     # state; downstream approvals remain the source of truth, so an early row
     # cannot jump directly to publication or source-material review.
+    stale_initial_submission = bool(
+        scenario is not None
+        and submit_requested
+        and not inbound_update_allowed(scenario)
+    )
+    if stale_initial_submission:
+        submit_requested = False
     legacy_full_snapshot = bool(
         not source_submit_payload
         and not publication_submit_payload

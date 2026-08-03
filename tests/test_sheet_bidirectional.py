@@ -615,7 +615,7 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
 
     legacy_invalid_mode_session = InboundSession(
         inbound_event(
-            "",
+            "Отправить",
             {
                 "external_id": "20260802901",
                 "speaker": "Также не должно перезаписаться",
