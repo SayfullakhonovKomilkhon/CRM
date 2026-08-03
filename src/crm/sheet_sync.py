@@ -685,10 +685,7 @@ async def process_inbound_event(
         and publication_submit_requested
         and stage_fields <= LIVE_SCENARIST_PUBLICATION_FIELDS
     )
-    scenarist_stage_action = bool(
-        live_update_payload or source_submit_payload or publication_submit_payload
-    )
-    if scenario is None and scenarist_stage_action:
+    if scenario is None:
         legacy_scenario = await session.scalar(
             select(Scenario)
             .where(
@@ -709,7 +706,7 @@ async def process_inbound_event(
         if legacy_scenario is not None:
             legacy_scenario.crm_row_id = event.crm_row_id
             scenario = legacy_scenario
-    if scenario is None and scenarist_stage_action:
+    if scenario is None:
         external_id = str(inbound_fields.get("external_id") or "").strip()
         if external_id:
             recovered_scenario = await session.scalar(
