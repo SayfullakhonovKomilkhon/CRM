@@ -613,30 +613,30 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
         == "Снимок без sync_mode"
     )
 
-    legacy_live_mode_session = InboundSession(
+    legacy_invalid_mode_session = InboundSession(
         inbound_event(
             "",
             {
                 "external_id": "20260802901",
                 "speaker": "Также не должно перезаписаться",
                 "publication.publication_date": "2026-08-17",
-                "publication.description_youtube": "Полный снимок live update",
+                "publication.description_youtube": "Полный снимок со старой меткой",
             },
             publication_row_id,
-            "scenarist_live_update",
+            "submission",
         ),
         publication_existing,
     )
-    legacy_live_mode_result = await process_inbound_event(
-        legacy_live_mode_session,
-        legacy_live_mode_session.event.id,
+    legacy_invalid_mode_result = await process_inbound_event(
+        legacy_invalid_mode_session,
+        legacy_invalid_mode_session.event.id,
     )
-    assert legacy_live_mode_result.status == SheetEventStatus.COMPLETED
+    assert legacy_invalid_mode_result.status == SheetEventStatus.COMPLETED
     assert publication_existing.speaker is None
     assert str(publication_existing.publication.publication_date) == "2026-08-17"
     assert (
         publication_existing.publication.description_youtube
-        == "Полный снимок live update"
+        == "Полный снимок со старой меткой"
     )
 
     source.inbound_column_map["publication.publication_date"] = "BE"

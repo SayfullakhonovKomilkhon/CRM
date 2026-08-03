@@ -746,7 +746,9 @@ async def process_inbound_event(
     # state; downstream approvals remain the source of truth, so an early row
     # cannot jump directly to publication or source-material review.
     legacy_full_snapshot = bool(
-        not sync_mode or (live_update_requested and not live_update_payload)
+        not source_submit_payload
+        and not publication_submit_payload
+        and not live_update_payload
     )
     if scenario is not None and legacy_full_snapshot and not submit_requested:
         publication_values = {
