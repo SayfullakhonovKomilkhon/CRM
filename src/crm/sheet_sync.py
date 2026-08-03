@@ -741,6 +741,63 @@ async def process_inbound_event(
                 recovered_scenario.source_tab = source.source_tab
                 recovered_scenario.source_row = event.row_number
                 scenario = recovered_scenario
+    # Very old project-tab scripts have no sync_mode at all and post a full
+    # row snapshot.  Infer only the currently open scenarist stage from CRM
+    # state; downstream approvals remain the source of truth, so an early row
+    # cannot jump directly to publication or source-material review.
+    if scenario is not None and not sync_mode and not submit_requested:
+        publication_values = {
+            field_name: value
+            for field_name, value in inbound_fields.items()
+            if field_name in LIVE_SCENARIST_PUBLICATION_FIELDS
+            and value not in (None, "")
+        }
+        source_values = {
+            field_name: value
+            for field_name, value in inbound_fields.items()
+            if field_name in SOURCE_MATERIAL_CONTENT_FIELDS
+            and value not in (None, "")
+        }
+        if (
+            scenario.status == ScenarioStatus.APPROVED
+            and is_approved(scenario, ApprovalStage.FINAL_CLIENT)
+            and publication_values
+        ):
+            publication_submit_requested = True
+            inbound_fields = {
+                field_name: value
+                for field_name, value in inbound_fields.items()
+                if field_name in LIVE_SCENARIST_PUBLICATION_FIELDS
+                or field_name == "external_id"
+            }
+        elif (
+            is_approved(scenario, ApprovalStage.PRE_GENERATION_CLIENT)
+            and source_values
+        ):
+            source_submit_requested = True
+            inbound_fields = {
+                field_name: value
+                for field_name, value in inbound_fields.items()
+                if field_name in LIVE_SCENARIST_SOURCE_FIELDS
+                or field_name == "external_id"
+            }
+    stage_fields = set(inbound_fields) - {"external_id"}
+    live_update_payload = bool(
+        not submit_requested
+        and live_update_requested
+        and stage_fields
+        and stage_fields <= LIVE_SCENARIST_FIELDS
+    )
+    source_submit_payload = bool(
+        not submit_requested
+        and source_submit_requested
+        and stage_fields <= LIVE_SCENARIST_SOURCE_FIELDS
+    )
+    publication_submit_payload = bool(
+        not submit_requested
+        and publication_submit_requested
+        and stage_fields <= LIVE_SCENARIST_PUBLICATION_FIELDS
+    )
     live_update = bool(live_update_payload and scenario is not None)
     source_submit = bool(source_submit_payload and scenario is not None)
     publication_submit = bool(publication_submit_payload and scenario is not None)

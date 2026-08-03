@@ -588,6 +588,32 @@ async def test_submitted_partial_row_enters_manager_queue_and_draft_is_skipped()
     )
 
     source.inbound_column_map["publication.publication_date"] = "BE"
+    legacy_without_mode_session = InboundSession(
+        inbound_event(
+            "",
+            {
+                "external_id": "20260802901",
+                "speaker": "Сценарное поле остаётся заблокированным",
+                "publication.publication_date": "2026-08-16",
+                "publication.description_youtube": "Снимок без sync_mode",
+            },
+            publication_row_id,
+        ),
+        publication_existing,
+    )
+    legacy_without_mode_result = await process_inbound_event(
+        legacy_without_mode_session,
+        legacy_without_mode_session.event.id,
+    )
+    assert legacy_without_mode_result.status == SheetEventStatus.COMPLETED
+    assert publication_existing.speaker is None
+    assert str(publication_existing.publication.publication_date) == "2026-08-16"
+    assert (
+        publication_existing.publication.description_youtube
+        == "Снимок без sync_mode"
+    )
+
+    source.inbound_column_map["publication.publication_date"] = "BE"
     date_only_row_id = uuid.uuid4()
     date_only_existing = Scenario(
         project_id=project_id,
