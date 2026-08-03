@@ -745,7 +745,10 @@ async def process_inbound_event(
     # row snapshot.  Infer only the currently open scenarist stage from CRM
     # state; downstream approvals remain the source of truth, so an early row
     # cannot jump directly to publication or source-material review.
-    if scenario is not None and not sync_mode and not submit_requested:
+    legacy_full_snapshot = bool(
+        not sync_mode or (live_update_requested and not live_update_payload)
+    )
+    if scenario is not None and legacy_full_snapshot and not submit_requested:
         publication_values = {
             field_name: value
             for field_name, value in inbound_fields.items()
